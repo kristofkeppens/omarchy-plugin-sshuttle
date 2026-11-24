@@ -7,8 +7,12 @@ import ipaddress
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 METHODS = ("auto", "nft", "nat", "tproxy")
@@ -240,7 +244,224 @@ def build_argv(profile: dict, sshuttle_bin: str) -> list:
 
 
 # --------------------------------------------------------------------------
+# Process control
+# --------------------------------------------------------------------------
+
+CONNECTED_MARKER = "Connected to server."
+_children = {}  # pid -> Popen, so exited children are reaped in-process
+
+
+def _bin() -> str:
+    return os.environ.get("SSHUTTLE_BIN") or "sshuttle"
+
+
+def _installed() -> bool:
+    return shutil.which(_bin()) is not None
+
+
+def _not_found_msg() -> str:
+    return f"sshuttle not found ({_bin()}); install it first"
+
+
+def _connect_timeout() -> float:
+    try:
+        return float(os.environ.get("SSHUTTLE_PANEL_CONNECT_TIMEOUT", "30"))
+    except ValueError:
+        return 30.0
+
+
+def _state_path() -> Path:
+    return runtime_dir() / "state.json"
+
+
+def _log_path() -> Path:
+    return runtime_dir() / "sshuttle.log"
+
+
+def _read_state():
+    try:
+        st = json.loads(_state_path().read_text())
+        if isinstance(st, dict) and type(st.get("pid")) is int and st["pid"] > 1:
+            return st
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _write_state(st):
+    d = runtime_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".state-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(st, f)
+        os.replace(tmp, _state_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _remove_state():
+    try:
+        _state_path().unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _alive(pid: int) -> bool:
+    """True if pid exists and is (still) our sshuttle, not a reused pid."""
+    child = _children.get(pid)
+    if child is not None and child.poll() is not None:
+        del _children[pid]
+        return False
+    try:
+        os.kill(pid, 0)
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (ProcessLookupError, FileNotFoundError):
+        return False
+    except PermissionError:
+        return False
+    base = os.path.basename(_bin()).encode()
+    return base in cmdline
+
+
+def _signal(pid: int, sig) -> None:
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _wait_gone(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        if not _alive(pid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate(pid: int) -> None:
+    _signal(pid, signal.SIGTERM)
+    if not _wait_gone(pid, 5.0):
+        _signal(pid, signal.SIGKILL)
+        _wait_gone(pid, 2.0)
+    child = _children.pop(pid, None)
+    if child is not None:
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def read_log() -> list:
+    try:
+        text = _log_path().read_bytes()[-65536:].decode("utf-8", "replace")
+    except OSError:
+        return []
+    return text.splitlines()[-50:]
+
+
+def _last_log_line():
+    for line in reversed(read_log()):
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def start(name) -> dict:
+    if not _installed():
+        raise ProfileError(_not_found_msg())
+    if status()["state"] in ("connecting", "connected"):
+        raise ProfileError("already running")
+    store = load_store()
+    name = name or store["default"]
+    if not name:
+        raise ProfileError("no profile given and no default profile set")
+    profile = next((p for p in store["profiles"] if p["name"] == name), None)
+    if profile is None:
+        raise ProfileError(f"unknown profile: {name}")
+    _remove_state()
+    argv = build_argv(profile, _bin())
+    d = runtime_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(_log_path(), "wb") as log:
+        try:
+            proc = subprocess.Popen(
+                argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT)
+        except OSError as e:
+            raise ProfileError(f"could not start sshuttle: {e}")
+    _children[proc.pid] = proc
+    _write_state({"pid": proc.pid, "profile": name, "started": time.time()})
+    return {"ok": True, "pid": proc.pid}
+
+
+def stop() -> dict:
+    st = _read_state()
+    if st is not None and _alive(st["pid"]):
+        _terminate(st["pid"])
+    _remove_state()
+    return {"ok": True}
+
+
+def status() -> dict:
+    out = {"ok": True, "state": "disconnected", "profile": None, "pid": None,
+           "since": None, "error": None,
+           "sshuttle_installed": _installed(), "sudo_ready": False}
+    st = _read_state()
+    if st is None:
+        if not out["sshuttle_installed"]:
+            out.update(state="error", error=_not_found_msg())
+        return out
+    pid = st["pid"]
+    started = st.get("started")
+    out["profile"] = st.get("profile")
+    out["since"] = float(started) if isinstance(started, (int, float)) else None
+    if isinstance(st.get("error"), str):  # a recorded failure persists until stop/start
+        out.update(state="error", error=st["error"])
+        return out
+    if not _alive(pid):
+        msg = _last_log_line() if (st.get("profile") and _log_path().exists()) else None
+        if msg is None:
+            _remove_state()  # stale: nothing ran, or pid belongs to something else
+            out.update(profile=None, since=None)
+        else:
+            _write_state({**st, "error": msg})
+            out.update(state="error", error=msg)
+        if not out["sshuttle_installed"] and msg is None:
+            out.update(state="error", error=_not_found_msg())
+        return out
+    out["pid"] = pid
+    if st.get("connected") or any(CONNECTED_MARKER in l for l in read_log()):
+        if not st.get("connected"):
+            _write_state({**st, "connected": True})
+        out["state"] = "connected"
+        return out
+    out["state"] = "connecting"
+    if isinstance(started, (int, float)) and time.time() - started > _connect_timeout():
+        _terminate(pid)
+        msg = f"connection timed out after {_connect_timeout():g}s"
+        _write_state({**st, "error": msg})
+        out.update(state="error", error=msg, pid=None)
+    return out
+
+
+# --------------------------------------------------------------------------
 # CLI
+# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 
 def _emit(obj):
@@ -268,6 +489,16 @@ def _dispatch(cmd, args):
     if cmd == "set-default":
         set_default(_need_name(args))
         return {"ok": True}
+    if cmd == "start":
+        if len(args) > 1:
+            raise ProfileError("expected at most one NAME argument")
+        return start(args[0] if args else None)
+    if cmd == "stop":
+        return stop()
+    if cmd == "status":
+        return status()
+    if cmd == "log":
+        return {"ok": True, "lines": read_log()}
     raise ProfileError(f"unknown command: {cmd}")
 
 

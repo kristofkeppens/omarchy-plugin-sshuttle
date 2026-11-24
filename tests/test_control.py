@@ -181,6 +181,127 @@ class TestStale(Base):
             self.assertEqual(ctl.status()["state"], "disconnected")
 
 
+class TestHardening(Base):
+    mode = "silent"
+
+    def _spawn(self, argv):
+        import subprocess
+        p = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p
+
+    def _write_state(self, **kw):
+        ctl.runtime_dir().mkdir(parents=True, exist_ok=True)
+        self.state_path().write_text(json.dumps(
+            {"pid": 1234567, "profile": "w", "started": time.time(), **kw}))
+
+    def _log(self, text):
+        ctl.runtime_dir().mkdir(parents=True, exist_ok=True)
+        (ctl.runtime_dir() / "sshuttle.log").write_text(text)
+
+    def test_connected_then_gone_is_disconnected_not_error(self):
+        self._write_state(connected=True)
+        self._log("c : Connected to server.\nclient: fw: something odd\n")
+        st = ctl.status()
+        self.assertEqual(st["state"], "disconnected")
+        self.assertIsNone(st["error"])
+        self.assertFalse(self.state_path().exists())
+
+    def test_connected_marker_in_log_then_gone_is_disconnected(self):
+        self._write_state()  # connected flag never persisted
+        self._log("c : Connected to server.\nTerminated\n")
+        self.assertEqual(ctl.status()["state"], "disconnected")
+
+    def test_never_connected_then_gone_is_error(self):
+        self._write_state()
+        self._log("Permission denied (publickey).\n")
+        st = ctl.status()
+        self.assertEqual(st["state"], "error")
+        self.assertIn("Permission denied", st["error"])
+
+    def test_pid_reuse_with_log_present_is_disconnected(self):
+        self._log("Permission denied (publickey).\n")
+        self._write_state()
+        st = json.loads(self.state_path().read_text())
+        st["pid"] = os.getpid()
+        self.state_path().write_text(json.dumps(st))
+        out = ctl.status()
+        self.assertEqual(out["state"], "disconnected")
+        self.assertIsNone(out["pid"])
+        self.assertFalse(self.state_path().exists())
+
+    def test_alive_permission_error_means_exists(self):
+        p = self._spawn([FAKE])
+        time.sleep(0.2)
+        with mock.patch.object(ctl.os, "kill", side_effect=PermissionError):
+            self.assertTrue(ctl._alive(p.pid))
+
+    def test_alive_proc_read_oserror_is_not_alive(self):
+        with mock.patch.object(ctl.Path, "read_bytes", side_effect=PermissionError):
+            self.assertFalse(ctl._alive(os.getpid()))
+
+    def test_alive_matches_argv0_or_argv1_basename_only(self):
+        p = self._spawn([sys.executable, "-c", "import time; time.sleep(30)", "sshuttle"])
+        time.sleep(0.2)
+        with mock.patch.dict(os.environ, {"SSHUTTLE_BIN": "/usr/bin/sshuttle"}):
+            self.assertFalse(ctl._alive(p.pid))
+        q = self._spawn([FAKE])  # python3 /path/fake_sshuttle.py
+        time.sleep(0.2)
+        self.assertTrue(ctl._alive(q.pid))
+        # `env python3 script` (shebang before env has exec'd python)
+        r = self._spawn(["env", sys.executable, FAKE])
+        time.sleep(0.2)
+        self.assertTrue(ctl._alive(r.pid))
+
+    def test_concurrent_start_yields_one_process(self):
+        import threading
+        orig = ctl.status
+
+        def slow_status():
+            r = orig()
+            time.sleep(0.3)
+            return r
+
+        results = []
+
+        def run():
+            try:
+                results.append(("ok", ctl.start("w")["pid"]))
+            except ctl.ProfileError as e:
+                results.append(("err", str(e)))
+
+        def reap():
+            for kind, v in results:
+                if kind == "ok":
+                    try:
+                        os.killpg(v, 9)
+                    except OSError:
+                        pass
+        self.addCleanup(reap)
+        with mock.patch.object(ctl, "status", slow_status):
+            ts = [threading.Thread(target=run) for _ in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        self.assertEqual(sorted(k for k, _ in results), ["err", "ok"], results)
+        pid = [v for k, v in results if k == "ok"][0]
+        self.assertTrue(ctl._alive(pid))
+
+    def test_log_reads_only_tail(self):
+        self._log("".join(f"line{i}\n" for i in range(200000)))
+        with mock.patch.object(ctl.Path, "read_bytes", side_effect=AssertionError("whole file read")):
+            lines = ctl.read_log()
+        self.assertEqual(lines[-1], "line199999")
+        self.assertEqual(len(lines), 50)
+
+    def test_log_file_mode_0600(self):
+        ctl.start("w")
+        mode = os.stat(ctl.runtime_dir() / "sshuttle.log").st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+
 class TestMissingBinary(Base):
     def test_missing_binary_is_error(self):
         with mock.patch.dict(os.environ, {"SSHUTTLE_BIN": "/nonexistent/sshuttle"}):

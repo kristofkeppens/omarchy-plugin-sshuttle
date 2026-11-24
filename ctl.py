@@ -3,6 +3,7 @@
 
 Stdout is always one JSON object; exit code 0 when ok, 1 otherwise.
 """
+import fcntl
 import ipaddress
 import json
 import os
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 METHODS = ("auto", "nft", "nat", "tproxy")
@@ -311,21 +313,52 @@ def _remove_state():
         pass
 
 
-def _alive(pid: int) -> bool:
-    """True if pid exists and is (still) our sshuttle, not a reused pid."""
+def _pid_state(pid: int) -> str:
+    """'gone', 'ours' (our sshuttle) or 'foreign' (pid exists, other program)."""
     child = _children.get(pid)
     if child is not None and child.poll() is not None:
         del _children[pid]
-        return False
+        return "gone"
     try:
         os.kill(pid, 0)
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except (ProcessLookupError, FileNotFoundError):
-        return False
+    except ProcessLookupError:
+        return "gone"
     except PermissionError:
-        return False
-    base = os.path.basename(_bin()).encode()
-    return base in cmdline
+        pass  # exists, owned by someone else; the cmdline check decides
+    cmdline = b""
+    for attempt in range(5):
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except FileNotFoundError:
+            return "gone"
+        except OSError:
+            return "foreign"
+        if cmdline:
+            break
+        time.sleep(0.02)  # empty mid-exec; stays empty for a zombie
+    else:
+        return "gone"
+    # sshuttle is a python script: argv is `python3 /usr/bin/sshuttle ...`
+    argv = [a for a in cmdline.split(b"\0") if a]
+    # right after fork the shebang's `env` has not exec'd python yet:
+    # `/usr/bin/env python3 /usr/bin/sshuttle ...`
+    argv = argv[1:4] if argv[:1] and os.path.basename(argv[0]) == b"env" else argv[:2]
+    want = os.path.basename(_bin()).encode()
+    return "ours" if any(os.path.basename(a) == want for a in argv) else "foreign"
+
+
+def _alive(pid: int) -> bool:
+    """True if pid exists and is (still) our sshuttle, not a reused pid."""
+    return _pid_state(pid) == "ours"
+
+
+@contextmanager
+def _lock():
+    d = runtime_dir()
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(d / "lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield  # released when f closes
 
 
 def _signal(pid: int, sig) -> None:
@@ -368,7 +401,10 @@ def _terminate(pid: int) -> None:
 
 def read_log() -> list:
     try:
-        text = _log_path().read_bytes()[-65536:].decode("utf-8", "replace")
+        with open(_log_path(), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))
+            text = f.read().decode("utf-8", "replace")
     except OSError:
         return []
     return text.splitlines()[-50:]
@@ -382,6 +418,11 @@ def _last_log_line():
 
 
 def start(name) -> dict:
+    with _lock():
+        return _start(name)
+
+
+def _start(name) -> dict:
     if not _installed():
         raise ProfileError(_not_found_msg())
     if status()["state"] in ("connecting", "connected"):
@@ -397,7 +438,9 @@ def start(name) -> dict:
     argv = build_argv(profile, _bin())
     d = runtime_dir()
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with open(_log_path(), "wb") as log:
+    fd = os.open(_log_path(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.chmod(_log_path(), 0o600)
+    with os.fdopen(fd, "wb") as log:
         try:
             proc = subprocess.Popen(
                 argv, start_new_session=True, stdin=subprocess.DEVNULL,
@@ -410,6 +453,11 @@ def start(name) -> dict:
 
 
 def stop() -> dict:
+    with _lock():
+        return _stop()
+
+
+def _stop() -> dict:
     st = _read_state()
     if st is not None and _alive(st["pid"]):
         _terminate(st["pid"])
@@ -433,16 +481,24 @@ def status() -> dict:
     if isinstance(st.get("error"), str):  # a recorded failure persists until stop/start
         out.update(state="error", error=st["error"])
         return out
-    if not _alive(pid):
-        msg = _last_log_line() if (st.get("profile") and _log_path().exists()) else None
+    pst = _pid_state(pid)
+    if pst != "ours":
+        # An error is only reported when the process died after a failed
+        # start. Reached `connected` and gone (clean kill), or a foreign
+        # process owns the pid -> just disconnected.
+        had_connected = bool(st.get("connected")) or any(
+            CONNECTED_MARKER in l for l in read_log())
+        msg = None
+        if pst == "gone" and not had_connected and st.get("profile") and _log_path().exists():
+            msg = _last_log_line()
         if msg is None:
-            _remove_state()  # stale: nothing ran, or pid belongs to something else
+            _remove_state()
             out.update(profile=None, since=None)
+            if not out["sshuttle_installed"]:
+                out.update(state="error", error=_not_found_msg())
         else:
             _write_state({**st, "error": msg})
             out.update(state="error", error=msg)
-        if not out["sshuttle_installed"] and msg is None:
-            out.update(state="error", error=_not_found_msg())
         return out
     out["pid"] = pid
     if st.get("connected") or any(CONNECTED_MARKER in l for l in read_log()):

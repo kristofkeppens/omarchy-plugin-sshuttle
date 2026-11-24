@@ -17,6 +17,11 @@ mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "die":
     print("Permission denied (publickey).", file=sys.stderr, flush=True)
     sys.exit(255)
+if mode == "fwfail":  # handshake done, then the firewall step fails
+    print("c : Connected to server.", file=sys.stderr, flush=True)
+    time.sleep(0.2)
+    print("c : fatal: ['nft', 'add', 'table'] returned 1", file=sys.stderr, flush=True)
+    sys.exit(99)
 if mode == "ok":
     print("c : Connected to server.", file=sys.stderr, flush=True)
 while True:

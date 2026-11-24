@@ -421,6 +421,24 @@ def _last_log_line():
     return None
 
 
+MAX_ERROR = 500
+_FATAL_RE = re.compile(r"\bfatal:")
+
+
+def _failure_after_connect(lines):
+    """The failure sshuttle logged after its last `Connected to server.`:
+    the first `fatal:` line, else the last line of a traceback; None for a
+    clean exit. Only consulted once the process is gone."""
+    marks = [i for i, l in enumerate(lines) if CONNECTED_MARKER in l]
+    tail = [l.strip() for l in lines[marks[-1] + 1:]] if marks else []
+    for l in tail:
+        if _FATAL_RE.search(l):
+            return l
+    if any(l.startswith("Traceback") for l in tail):
+        return next((l for l in reversed(tail) if l), None)
+    return None
+
+
 def start(name) -> dict:
     with _lock():
         return _start(name)
@@ -496,14 +514,17 @@ def status() -> dict:
         return out
     pst = _pid_state(pid)
     if pst != "ours":
-        # An error is only reported when the process died after a failed
-        # start. Reached `connected` and gone (clean kill), or a foreign
+        # An error is reported when the process died after a failed start,
+        # or died after the handshake with a failure logged after it (sshuttle
+        # prints `Connected to server.` before it sets up the firewall).
+        # Reached `connected` and gone cleanly (external kill), or a foreign
         # process owns the pid -> just disconnected.
-        had_connected = bool(st.get("connected")) or any(
-            CONNECTED_MARKER in l for l in read_log())
+        lines = read_log()
+        had_connected = bool(st.get("connected")) or any(CONNECTED_MARKER in l for l in lines)
         msg = None
-        if pst == "gone" and not had_connected and st.get("profile") and _log_path().exists():
-            msg = _last_log_line()
+        if pst == "gone" and st.get("profile") and _log_path().exists():
+            msg = _failure_after_connect(lines) if had_connected else _last_log_line()
+            msg = msg[:MAX_ERROR] if msg else None
         if msg is None:
             _remove_state()
             out.update(profile=None, since=None)

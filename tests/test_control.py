@@ -151,6 +151,19 @@ class TestDie(Base):
         self.assertEqual(ctl.status()["state"], "error")
 
 
+class TestFirewallFailure(Base):
+    mode = "fwfail"
+
+    def test_fatal_after_handshake_is_error_not_disconnected(self):
+        ctl.start("w")
+        st = wait_for(lambda: (s := ctl.status())["state"] == "error" and s)
+        self.assertTrue(st, ctl.status())
+        self.assertEqual(st["error"], "c : fatal: ['nft', 'add', 'table'] returned 1")
+        self.assertEqual(ctl.status()["state"], "error")  # sticky until stop
+        ctl.stop()
+        self.assertEqual(ctl.status()["state"], "disconnected")
+
+
 class TestStale(Base):
     def test_stale_state_file_is_disconnected(self):
         ctl.runtime_dir().mkdir(parents=True)
@@ -212,6 +225,44 @@ class TestHardening(Base):
     def test_connected_marker_in_log_then_gone_is_disconnected(self):
         self._write_state()  # connected flag never persisted
         self._log("c : Connected to server.\nTerminated\n")
+        self.assertEqual(ctl.status()["state"], "disconnected")
+
+    def test_fatal_after_marker_then_gone_is_error(self):
+        for flag in ({}, {"connected": True}):
+            with self.subTest(flag):
+                self._write_state(**flag)
+                self._log("c : Connected to server.\nc : fatal: failed to set up nft\n")
+                st = ctl.status()
+                self.assertEqual(st["state"], "error")
+                self.assertEqual(st["error"], "c : fatal: failed to set up nft")
+                self.assertEqual(json.loads(self.state_path().read_text())["error"], st["error"])
+                ctl.stop()
+
+    def test_traceback_after_marker_then_gone_reports_last_line(self):
+        self._write_state(connected=True)
+        self._log("c : Connected to server.\nTraceback (most recent call last):\n"
+                  '  File "x", line 1\nOSError: [Errno 1] Operation not permitted\n\n')
+        st = ctl.status()
+        self.assertEqual(st["state"], "error")
+        self.assertEqual(st["error"], "OSError: [Errno 1] Operation not permitted")
+
+    def test_fatal_before_last_marker_is_ignored(self):
+        self._write_state(connected=True)
+        self._log("c : fatal: old\nc : Connected to server.\nTerminated\n")
+        self.assertEqual(ctl.status()["state"], "disconnected")
+
+    def test_fatal_error_line_is_clipped(self):
+        self._write_state(connected=True)
+        self._log("c : Connected to server.\nc : fatal: " + "x" * 2000 + "\n")
+        st = ctl.status()
+        self.assertEqual(st["state"], "error")
+        self.assertLessEqual(len(st["error"]), 500)
+
+    def test_fatal_after_marker_but_foreign_pid_is_disconnected(self):
+        self._write_state(connected=True)
+        st = json.loads(self.state_path().read_text())
+        self.state_path().write_text(json.dumps({**st, "pid": os.getpid()}))
+        self._log("c : Connected to server.\nc : fatal: x\n")
         self.assertEqual(ctl.status()["state"], "disconnected")
 
     def test_never_connected_then_gone_is_error(self):

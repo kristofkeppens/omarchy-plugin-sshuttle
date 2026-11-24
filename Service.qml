@@ -3,7 +3,7 @@ import Quickshell.Io
 import "Model.js" as Model
 
 // Talks to ctl.py. Every call is an argv list (never a shell string); profile
-// names are passed as separate argv elements and `save` input goes to stdin.
+// names and the `save` profile JSON are passed as separate argv elements.
 // Helper output is untrusted: only known fields are copied, with bounded sizes.
 Item {
   id: root
@@ -59,11 +59,11 @@ Item {
 
   // Command queue ----------------------------------------------------------
 
-  // args: argv after ctl.py; input: stdin text or null; handler(result, job);
+  // args: argv after ctl.py; handler(result, job);
   // done: optional caller callback receiving the parsed result.
-  function enqueue(args, input, handler, done, timeoutMs) {
+  function enqueue(args, handler, done, timeoutMs) {
     var q = _queue.slice()
-    q.push({ args: args, input: input, handler: handler, done: done, timeoutMs: timeoutMs || 60000 })
+    q.push({ args: args, handler: handler, done: done, timeoutMs: timeoutMs || 60000 })
     _queue = q
     runNext()
   }
@@ -75,7 +75,6 @@ Item {
     _queue = q
     _cmdActive = true
     _cmdOutput = ""
-    cmdProcess.stdinEnabled = _job.input !== null
     cmdProcess.command = ["python3", ctlPath].concat(_job.args)
     cmdProcess.running = true
     cmdWatchdog.interval = _job.timeoutMs
@@ -100,7 +99,7 @@ Item {
   // Public API -------------------------------------------------------------
 
   function refreshProfiles() {
-    enqueue(["list"], null, function (r) {
+    enqueue(["list"], function (r) {
       if (!r.ok) return
       var next = []
       var list = Array.isArray(r.profiles) ? r.profiles : []
@@ -116,34 +115,34 @@ Item {
   function connect(name) {
     var args = ["start"]
     if (name !== undefined && name !== null && String(name) !== "") args.push(String(name))
-    enqueue(args, null, function () { refresh() })
+    enqueue(args, function () { refresh() })
   }
 
   function disconnect() {
-    enqueue(["stop"], null, function () { refresh() })
+    enqueue(["stop"], function () { refresh() })
   }
 
   function saveProfile(profile, done) {
-    enqueue(["save"], JSON.stringify(profile || {}), function (r) {
+    enqueue(["save", "--json", JSON.stringify(profile || {})], function (r) {
       if (r.ok) refreshProfiles()
     }, done)
   }
 
   function deleteProfile(name) {
-    enqueue(["delete", String(name)], null, function () { refreshProfiles() })
+    enqueue(["delete", String(name)], function () { refreshProfiles() })
   }
 
   function setDefault(name) {
-    enqueue(["set-default", String(name)], null, function () { refreshProfiles() })
+    enqueue(["set-default", String(name)], function () { refreshProfiles() })
   }
 
   // Only ever called from an explicit user action; never automatic.
   function setupSudo() {
-    enqueue(["setup-sudo"], null, function () { refresh() }, null, 180000)
+    enqueue(["setup-sudo"], function () { refresh() }, null, 180000)
   }
 
   function loadLog() {
-    enqueue(["log"], null, function (r) {
+    enqueue(["log"], function (r) {
       if (r.ok) logLines = Model.sanitizeLines(r.lines)
     })
   }
@@ -198,15 +197,7 @@ Item {
     id: cmdProcess
     running: false
     command: []
-    stdinEnabled: false
     stdout: StdioCollector { id: cmdStdout; waitForEnd: true; onStreamFinished: root._cmdOutput = text }
-    onStarted: {
-      if (root._job && root._job.input !== null) {
-        write(root._job.input)
-        // Disabling stdin closes the pipe so ctl.py's stdin.read() sees EOF.
-        stdinEnabled = false
-      }
-    }
     onExited: function (exitCode) {
       root._cmdOutput = String(cmdStdout.text || root._cmdOutput || "")
       root.finishCommand(exitCode)

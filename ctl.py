@@ -680,6 +680,9 @@ def setup_sudo() -> dict:
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 
+MAX_JSON_ARG = 16 * 1024
+
+
 def _emit(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
 
@@ -694,10 +697,20 @@ def _dispatch(cmd, args):
     if cmd == "list":
         return {"ok": True, **load_store()}
     if cmd == "save":
+        if args and args[0] == "--json":
+            if len(args) != 2:
+                raise ProfileError("--json expects exactly one argument")
+            text, where = args[1], "argument"
+            if len(text.encode("utf-8")) > MAX_JSON_ARG:
+                raise ProfileError("profile JSON too large")
+        elif args:
+            raise ProfileError("unexpected arguments for save")
+        else:
+            text, where = sys.stdin.read(), "stdin"
         try:
-            raw = json.loads(sys.stdin.read())
+            raw = json.loads(text)
         except ValueError:
-            raise ProfileError("invalid JSON on stdin")
+            raise ProfileError("invalid JSON on " + where)
         return {"ok": True, "profile": save_profile(raw)}
     if cmd == "delete":
         delete_profile(_need_name(args))

@@ -108,7 +108,7 @@ class TestStore(Base):
 class TestCli(Base):
     def run_main(self, args, stdin=""):
         out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO(stdin)), redirect_stdout(out):
+        with mock.patch("sys.stdin", io.StringIO(stdin) if isinstance(stdin, str) else stdin), redirect_stdout(out):
             rc = ctl.main(args)
         return rc, json.loads(out.getvalue())
 
@@ -134,6 +134,27 @@ class TestCli(Base):
         self.assertEqual(rc, 1)
         self.assertFalse(out["ok"])
         self.assertIn("error", out)
+
+    def test_save_json_arg_never_reads_stdin(self):
+        class Boom:
+            def read(self):
+                raise AssertionError("stdin must not be read")
+        rc, out = self.run_main(["save", "--json", json.dumps({"name": "a", "remote": "h"})], Boom())
+        self.assertEqual(rc, 0)
+        self.assertTrue(out["ok"])
+        self.assertEqual(ctl.load_store()["profiles"][0]["name"], "a")
+
+    def test_save_json_arg_rejects_bad_input(self):
+        class Boom:
+            def read(self):
+                raise AssertionError("stdin must not be read")
+        for bad in (["save", "--json", "{nope"],
+                    ["save", "--json"],
+                    ["save", "--json", json.dumps({"name": "a", "remote": "h" * (16 * 1024)})]):
+            rc, out = self.run_main(bad, Boom())
+            self.assertEqual(rc, 1, bad[:2])
+            self.assertFalse(out["ok"])
+            self.assertIn("error", out)
 
 
 if __name__ == "__main__":

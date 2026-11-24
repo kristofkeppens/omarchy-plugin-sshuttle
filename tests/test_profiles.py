@@ -167,3 +167,44 @@ class TestCli(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExcludeHostnames(Base):
+    base = {"name": "w", "remote": "h"}
+
+    def test_excludes_accept_hostnames_and_ranges(self):
+        good = [
+            "intranet.example.com", "example.com:443", "example.com:8000-8080",
+            "localhost", "cafe.be", "a-b.example.org", "10.1.0.0/16", "fd00::/8",
+            "10.0.0.5",
+        ]
+        p = ctl.validate_profile({**self.base, "excludes": good})
+        self.assertEqual(p["excludes"], good)
+
+    def test_excludes_reject_bad_hostnames(self):
+        bad = [
+            "-evil.example.com", "-x", "exa mple.com", "example.com/24",
+            "example..com", ".example.com", "example.com.", "ex_ample.com",
+            "example.com:0", "example.com:70000", "example.com:90-80",
+            "example.com:abc", "exa$mple.com", "ex\nample.com", "example.com\n",
+            "10.0.0.256", "300.1.1.1", "999.999.999.999", "*.example.com",
+            "http://example.com", "user@example.com", "a" * 64 + ".com",
+        ]
+        for v in bad:
+            with self.subTest(exclude=v):
+                with self.assertRaises(ctl.ProfileError):
+                    ctl.validate_profile({**self.base, "excludes": [v]})
+
+    def test_subnets_still_reject_hostnames(self):
+        # Only excludes take hostnames; the include list stays addresses/ranges.
+        for v in ["example.com", "intranet.example.com:443"]:
+            with self.subTest(subnet=v):
+                with self.assertRaises(ctl.ProfileError):
+                    ctl.validate_profile({**self.base, "subnets": [v]})
+
+    def test_argv_passes_hostname_exclude_as_one_element(self):
+        p = ctl.validate_profile({**self.base, "excludes": ["example.com:443", "10.1.0.0/16"]})
+        argv = ctl.build_argv(p, "sshuttle")
+        self.assertEqual(argv.count("-x"), 2)
+        self.assertEqual(argv[argv.index("-x") + 1], "example.com:443")
+        self.assertIn("10.1.0.0/16", argv)

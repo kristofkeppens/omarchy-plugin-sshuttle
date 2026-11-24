@@ -110,6 +110,31 @@ def _validate_subnet(v):
     return v
 
 
+# sshuttle resolves a hostname given to -x itself, locally, when it starts.
+# A hostname takes an optional port or port range but no /mask: sshuttle
+# refuses a mask on a name that has both IPv4 and IPv6 addresses.
+_EXCLUDE_HOST_RE = re.compile(
+    rf"(?P<host>{_LABEL}(?:\.{_LABEL})*)"
+    r"(?::(?P<p1>[0-9]{1,5})(?:-(?P<p2>[0-9]{1,5}))?)?"
+)
+
+
+def _validate_exclude(v):
+    """An excluded subnet, or a hostname[:port[-port]]."""
+    try:
+        return _validate_subnet(v)
+    except ProfileError as subnet_error:
+        # A dotted-decimal name with no letters is a malformed address, not a host.
+        m = _EXCLUDE_HOST_RE.fullmatch(v) if isinstance(v, str) else None
+        if not m or not re.search(r"[A-Za-z]", m.group("host")):
+            raise ProfileError(f"invalid exclude (expected subnet or hostname): {v!r}") from subnet_error
+    _check_port(m.group("p1"), "exclude")
+    _check_port(m.group("p2"), "exclude")
+    if m.group("p2") and int(m.group("p1")) > int(m.group("p2")):
+        raise ProfileError(f"invalid port range: {v!r}")
+    return v
+
+
 def _validate_list(raw, key, default, check):
     v = raw.get(key, default)
     if not isinstance(v, list):
@@ -145,7 +170,7 @@ def validate_profile(raw: object) -> dict:
         "name": name,
         "remote": _validate_remote(raw.get("remote")),
         "subnets": _validate_list(raw, "subnets", ["0/0"], _validate_subnet) or ["0/0"],
-        "excludes": _validate_list(raw, "excludes", [], _validate_subnet),
+        "excludes": _validate_list(raw, "excludes", [], _validate_exclude),
         "dns": raw.get("dns", False),
         "method": method,
         "disable_ipv6": raw.get("disable_ipv6", False),

@@ -82,7 +82,7 @@ If sshuttle is not installed the panel says so.
 | Name | 1-40 characters, not blank, no control characters. |
 | Remote | `[user@]host[:port]`. Host is a hostname, IPv4 address or `[IPv6]`. Port 1-65535. Max 300 characters. |
 | Subnets | One per line, `addr[/mask][:port[-port]]`. Empty means `0/0` (all traffic). Max 200 entries of 100 characters. |
-| Excluded subnets | Same format, passed as `-x`. Same limits. |
+| Excluded subnets or hostnames | Each entry is either a subnet (same format as above) or a hostname with an optional port or port range, e.g. `intranet.example.com` or `example.com:8000-8080`. Passed as `-x`. A hostname takes no `/mask`. sshuttle resolves hostnames itself, on this machine, when it connects, so a name that does not resolve fails the connection with `Unable to resolve address`, and a name that changes address later is not re-resolved until you reconnect. Only excludes take hostnames; the subnets to forward stay addresses and ranges. Same limits. |
 | Forward DNS | Passes `--dns`. |
 | Method | `auto` (sshuttle's choice), `nft`, `nat` or `tproxy`. |
 | Disable IPv6 | Passes `--disable-ipv6`. |

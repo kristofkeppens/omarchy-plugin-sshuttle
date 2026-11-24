@@ -157,8 +157,17 @@ ssh-add -l                     # confirm the key is listed
 
 To have ssh load it automatically the first time you use it from a terminal,
 add `AddKeysToAgent yes` to `~/.ssh/config`. The panel's error message names
-this case. The agent must be the one the shell was started with
-(`SSH_AUTH_SOCK`); on Omarchy that is the systemd user agent socket.
+this case.
+
+The panel can only use the agent if it can find it. sshuttle inherits the
+desktop shell's environment, and the shell may have started before the agent
+did, so it can lack `SSH_AUTH_SOCK` even though your terminals have it. When
+`SSH_AUTH_SOCK` is unset, the panel falls back to the systemd user agent's
+standard socket, `$XDG_RUNTIME_DIR/ssh-agent.socket` (if it is a socket owned
+by you). An `SSH_AUTH_SOCK` that is set is never overridden. If your agent
+lives elsewhere (for example gpg-agent or a keyring), export `SSH_AUTH_SOCK`
+for the shell and restart it with `omarchy restart shell`. To see what the
+shell has: `tr '\0' '\n' < /proc/$(pgrep -o -f omarchy-shell)/environ | grep SSH_AUTH_SOCK`.
 
 ## Troubleshooting
 

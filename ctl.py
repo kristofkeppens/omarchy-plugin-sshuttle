@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -286,6 +287,29 @@ def _bin() -> str:
     return os.environ.get("SSHUTTLE_BIN") or "sshuttle"
 
 
+def _child_env() -> dict:
+    """The environment for sshuttle (and the ssh it runs).
+
+    The desktop shell can start before the user's ssh-agent does, so it may
+    lack SSH_AUTH_SOCK although the user's terminals have it, and ssh would
+    then never see the loaded keys. When it is unset, use the systemd user
+    agent's standard socket, if that is a socket the user owns. An existing
+    SSH_AUTH_SOCK is never overridden.
+    """
+    env = dict(os.environ)
+    if not env.get("SSH_AUTH_SOCK"):
+        runtime = env.get("XDG_RUNTIME_DIR")
+        if runtime:
+            candidate = os.path.join(runtime, "ssh-agent.socket")
+            try:
+                st = os.stat(candidate)
+            except OSError:
+                st = None
+            if st and stat.S_ISSOCK(st.st_mode) and st.st_uid == os.getuid():
+                env["SSH_AUTH_SOCK"] = candidate
+    return env
+
+
 def _installed() -> bool:
     return shutil.which(_bin()) is not None
 
@@ -507,7 +531,7 @@ def _start(name) -> dict:
         try:
             proc = subprocess.Popen(
                 argv, start_new_session=True, stdin=subprocess.DEVNULL,
-                stdout=log, stderr=subprocess.STDOUT)
+                stdout=log, stderr=subprocess.STDOUT, env=_child_env())
         except OSError as e:
             _clear_sudo_cache()
             raise ProfileError(f"could not start sshuttle: {e}")

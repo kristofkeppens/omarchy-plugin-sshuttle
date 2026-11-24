@@ -404,6 +404,54 @@ class TestSshFailureExplained(Base):
         self.assertEqual(ctl.status()["error"], "c : fatal: tproxy failed")
 
 
+class TestSshAgentFallback(Base):
+    """The shell can start before the ssh-agent exists, so it may lack
+    SSH_AUTH_SOCK even though the user's terminal has it. Fall back to the
+    systemd agent's standard socket in the user's runtime dir."""
+
+    def setUp(self):
+        super().setUp()
+        import socket
+        # AF_UNIX paths are limited to ~107 bytes; keep this directory short.
+        self.xdg = tempfile.TemporaryDirectory(prefix="x", dir="/tmp")
+        self.addCleanup(self.xdg.cleanup)
+        self.sock_path = os.path.join(self.xdg.name, "ssh-agent.socket")
+        self.env_file = os.path.join(self.run_dir.name, "env.json")
+        p = mock.patch.dict(os.environ, {
+            "XDG_RUNTIME_DIR": self.xdg.name, "FAKE_ENV_FILE": self.env_file, "FAKE_MODE": "ok"})
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        self.socket = socket
+
+    def _listen(self, path):
+        s = self.socket.socket(self.socket.AF_UNIX)
+        s.bind(path)
+        self.addCleanup(s.close)
+
+    def _seen(self):
+        ctl.start("w")
+        wait_for(lambda: os.path.exists(self.env_file) and os.path.getsize(self.env_file) > 0)
+        with open(self.env_file) as f:
+            return json.load(f)["SSH_AUTH_SOCK"]
+
+    def test_uses_the_systemd_agent_socket_when_unset(self):
+        self._listen(self.sock_path)
+        self.assertEqual(self._seen(), self.sock_path)
+
+    def test_an_existing_ssh_auth_sock_is_never_overridden(self):
+        self._listen(self.sock_path)
+        os.environ["SSH_AUTH_SOCK"] = "/somewhere/else.sock"
+        self.assertEqual(self._seen(), "/somewhere/else.sock")
+
+    def test_nothing_is_invented_when_there_is_no_agent_socket(self):
+        self.assertIsNone(self._seen())
+
+    def test_a_regular_file_is_not_mistaken_for_the_socket(self):
+        Path(self.sock_path).touch()
+        self.assertIsNone(self._seen())
+
+
 class TestMissingBinary(Base):
     def test_missing_binary_is_error(self):
         with mock.patch.dict(os.environ, {"SSHUTTLE_BIN": "/nonexistent/sshuttle"}):

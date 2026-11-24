@@ -13,6 +13,11 @@ if argv_file:
     with open(argv_file, "w") as f:
         json.dump(sys.argv, f)
 
+env_file = os.environ.get("FAKE_ENV_FILE")
+if env_file:
+    with open(env_file, "w") as f:
+        json.dump({"SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK")}, f)
+
 mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "die":
     print("Permission denied (publickey).", file=sys.stderr, flush=True)

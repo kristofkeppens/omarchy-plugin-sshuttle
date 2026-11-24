@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "sshuttle.panel",
+  "name": "sshuttle",
+  "version": "0.1.0",
+  "author": "Kristof Keppens",
+  "license": "MIT",
+  "description": "sshuttle status in the Omarchy bar, with a panel to manage profiles and connect or disconnect.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "sshuttle",
+    "description": "Shows whether sshuttle is connected and opens a panel to manage profiles and connect or disconnect.",
+    "category": "Status",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "iconSize": 18,
+      "refreshIntervalSec": 5,
+      "showLabel": false
+    },
+    "schema": [
+      {
+        "key": "iconSize",
+        "type": "integer",
+        "label": "Icon size",
+        "min": 8,
+        "max": 24,
+        "step": 1,
+        "defaultValue": 18
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Status refresh interval (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show the active profile name next to the icon",
+        "defaultValue": false
+      }
+    ]
+  }
+}

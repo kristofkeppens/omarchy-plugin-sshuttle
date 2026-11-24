@@ -28,6 +28,8 @@ Panel {
   property string selectedName: ""
   property bool logShown: false
   property bool confirmOpen: false
+  // What the confirmation is for: "delete" (pendingDelete) or "sudo".
+  property string confirmKind: ""
   property string pendingDelete: ""
 
   // Editor form. The fields bind to these, so opening the editor resets them.
@@ -66,6 +68,8 @@ Panel {
   readonly property string statusErrorText: svc.statusError !== "" ? translateError(svc.statusError) : (svc.status.error || "")
   readonly property bool showStatusError: installed && statusErrorText !== ""
   readonly property bool needsSudo: installed && svc.status.sudo_ready !== true
+  // A recorded failure (also the connect timeout) stays until stop clears it.
+  readonly property bool canClearError: installed && stateKey === "error"
 
   // The profile the list highlights and the switch connects: the one clicked,
   // else the default, else the first.
@@ -106,6 +110,7 @@ Panel {
     if (installed) r.push("power")
     if (commandErrorText !== "") r.push("dismiss")
     if (showStatusError) r.push("log")
+    if (showStatusError && canClearError) r.push("clear")
     if (needsSudo) r.push("sudo")
     for (var i = 0; i < svc.profiles.length; i++) r.push("profile:" + i)
     r.push("add")
@@ -193,7 +198,8 @@ Panel {
     if (id === "power") togglePower()
     else if (id === "dismiss") svc.dismissError()
     else if (id === "log") toggleLog()
-    else if (id === "sudo") svc.setupSudo()
+    else if (id === "clear") clearError()
+    else if (id === "sudo") askSetupSudo()
     else if (id === "add") openEditor("")
     else if (id === "edit") openEditor(selectedProfile)
     else if (id === "delete") askDelete(selectedProfile)
@@ -215,6 +221,7 @@ Panel {
   function togglePower() {
     if (!installed || svc.busy) return
     if (isOn) svc.disconnect()
+    else if (needsSudo) return
     else if (selectedProfile !== "") svc.connect(selectedProfile)
     else openEditor("")
   }
@@ -224,22 +231,45 @@ Panel {
     if (logShown) svc.loadLog()
   }
 
+  // `stop` drops the recorded error (and any leftover process).
+  function clearError() {
+    if (!canClearError) return
+    logShown = false
+    svc.disconnect()
+  }
+
   function askDelete(name) {
     if (name === "") return
     pendingDelete = name
+    confirmKind = "delete"
     confirmOpen = true
   }
 
-  function confirmDelete() {
-    var name = pendingDelete
-    confirmOpen = false
+  // The sudoers rule lets any program running as this user become root
+  // without a password; say so before polkit asks.
+  function askSetupSudo() {
+    if (!needsSudo) return
     pendingDelete = ""
-    if (name === "") return
+    confirmKind = "sudo"
+    confirmOpen = true
+  }
+
+  function confirmAction() {
+    if (!confirmOpen) return
+    var kind = confirmKind
+    var name = pendingDelete
+    cancelConfirm()
+    if (kind === "sudo") {
+      svc.setupSudo()
+      return
+    }
+    if (kind !== "delete" || name === "") return
     if (selectedName === name) selectedName = ""
     svc.deleteProfile(name)
   }
 
-  function cancelDelete() {
+  // confirmKind is left as is so the closing dialog keeps its wording.
+  function cancelConfirm() {
     confirmOpen = false
     pendingDelete = ""
   }
@@ -260,7 +290,7 @@ Panel {
     nameTaken = false
     saving = false
     editorToken += 1
-    confirmOpen = false
+    cancelConfirm()
     page = "editor"
     if (panelFlick) panelFlick.contentY = 0
     Qt.callLater(function() { if (root.page === "editor") root.focusRow("name") })
@@ -317,7 +347,7 @@ Panel {
   onOpenedChanged: if (opened) {
     cursorActive = false
     rowIndex = 0
-    confirmOpen = false
+    cancelConfirm()
     logShown = false
     if (panelFlick && page !== "editor") panelFlick.contentY = 0
     svc.refresh()
@@ -447,7 +477,7 @@ Panel {
 
       onMoveRequested: function(dx, dy) {
         if (root.confirmOpen) {
-          if (dx !== 0) deleteConfirm.selectedIndex = deleteConfirm.selectedIndex === 0 ? 1 : 0
+          if (dx !== 0) confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
           return
         }
         if (!root.cursorActive) { root.cursorActive = true; return }
@@ -455,20 +485,20 @@ Panel {
       }
       onActivateRequested: {
         if (root.confirmOpen) {
-          if (deleteConfirm.selectedIndex === 0) root.cancelDelete()
-          else root.confirmDelete()
+          if (confirmDialog.selectedIndex === 0) root.cancelConfirm()
+          else root.confirmAction()
           return
         }
         if (root.cursorActive) root.activateCursor()
       }
       onCloseRequested: {
-        if (root.confirmOpen) root.cancelDelete()
+        if (root.confirmOpen) root.cancelConfirm()
         else if (root.page === "editor") root.leaveEditor()
         else root.close()
       }
       onDeleteRequested: if (!root.confirmOpen && root.page === "") root.askDelete(root.cursorProfile())
       onTabRequested: function(direction) {
-        if (root.confirmOpen) deleteConfirm.selectedIndex = deleteConfirm.selectedIndex === 0 ? 1 : 0
+        if (root.confirmOpen) confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
         else if (root.page === "editor") root.focusRow(root.nextEditorRow(root.currentRow !== "" ? root.currentRow : "name", direction))
         else root.switchPanel(direction)
       }
@@ -542,8 +572,10 @@ Panel {
                   id: powerSwitch
                   checked: root.isOn
                   busy: svc.busy
-                  interactive: root.installed
-                  opacity: root.installed ? 1.0 : 0.4
+                  // Without the sudo grant a connect would hang in sudo; the
+                  // sudo card is the call to action. Disconnect stays possible.
+                  interactive: root.installed && (root.isOn || !root.needsSudo)
+                  opacity: interactive ? 1.0 : 0.4
                   hasCursor: header.ringVisible
                   foreground: hero.foreground
                   onHovered: function(on) { if (on) header.focusHero() }
@@ -581,6 +613,9 @@ Panel {
             urgentTone: true
             actionText: root.logShown ? strings.t("sshuttle.hideLog") : strings.t("sshuttle.showLog")
             onAction: root.toggleLog()
+            secondaryRowId: "clear"
+            secondaryText: root.canClearError ? strings.t("sshuttle.clearError") : ""
+            onSecondaryAction: root.clearError()
 
             Text {
               textFormat: Text.PlainText
@@ -599,7 +634,7 @@ Panel {
             rowId: "sudo"
             message: strings.t("sshuttle.sudoNeeded")
             actionText: strings.t("sshuttle.setUp")
-            onAction: svc.setupSudo()
+            onAction: root.askSetupSudo()
           }
 
           PanelSeparator {
@@ -795,19 +830,20 @@ Panel {
       }
 
       ConfirmDialog {
-        id: deleteConfirm
+        id: confirmDialog
         anchors.fill: parent
         z: 10
         opened: root.confirmOpen
-        message: root.fmt(strings.t("sshuttle.deleteConfirm"), root.pendingDelete)
+        message: root.confirmKind === "sudo" ? strings.t("sshuttle.sudoConfirm")
+          : root.fmt(strings.t("sshuttle.deleteConfirm"), root.pendingDelete)
         cancelText: strings.t("sshuttle.cancel")
-        confirmText: strings.t("sshuttle.delete")
+        confirmText: root.confirmKind === "sudo" ? strings.t("sshuttle.setUp") : strings.t("sshuttle.delete")
         foreground: root.foreground
         fontFamily: root.fontFamily
-        // Start on Cancel: Enter alone must not delete.
+        // Start on Cancel: Enter alone must not delete or grant root.
         onOpenedChanged: if (opened) selectedIndex = 0
-        onCanceled: root.cancelDelete()
-        onConfirmed: root.confirmDelete()
+        onCanceled: root.cancelConfirm()
+        onConfirmed: root.confirmAction()
       }
     }
   }
@@ -822,8 +858,12 @@ Panel {
     property string message: ""
     property string actionText: ""
     property bool urgentTone: false
+    // Optional second button (its own cursor row) next to the first.
+    property string secondaryRowId: ""
+    property string secondaryText: ""
     default property alias extra: extraColumn.data
     signal action()
+    signal secondaryAction()
 
     objectName: rowId !== "" ? "row:" + rowId : ""
     width: parent ? parent.width : implicitWidth
@@ -866,6 +906,20 @@ Panel {
           Layout.alignment: Qt.AlignVCenter
           onHovered: function(on) { if (on) root.setRowCursor(card.rowId) }
           onClicked: card.action()
+        }
+
+        Button {
+          objectName: card.secondaryRowId !== "" ? "row:" + card.secondaryRowId : ""
+          visible: card.secondaryText !== ""
+          text: card.secondaryText
+          bordered: true
+          hasCursor: card.secondaryRowId !== "" && root.currentRow === card.secondaryRowId
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.bodySmall
+          Layout.alignment: Qt.AlignVCenter
+          onHovered: function(on) { if (on) root.setRowCursor(card.secondaryRowId) }
+          onClicked: card.secondaryAction()
         }
       }
 

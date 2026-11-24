@@ -15,7 +15,7 @@
   "barWidget": {
     "displayName": "sshuttle",
     "description": "Shows whether sshuttle is connected and opens a panel to manage profiles and connect or disconnect.",
-    "category": "Status",
+    "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {

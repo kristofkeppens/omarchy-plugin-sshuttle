@@ -96,6 +96,7 @@ class ManifestTest(unittest.TestCase):
         self.assertTrue((ROOT / m["entryPoints"]["barWidget"]).is_file())
         bw = m["barWidget"]
         self.assertEqual(bw["defaultSection"], "right")
+        self.assertEqual(bw["category"], "Network")
         self.assertIs(bw["allowMultiple"], False)
 
     def test_settings_schema(self):
@@ -194,6 +195,61 @@ class TranslationTest(unittest.TestCase):
     def test_panel_uses_translations(self):
         src = (ROOT / "Panel.qml").read_text()
         self.assertRegex(src, r"Translations\s*\{[^}]*directory:\s*Qt\.resolvedUrl\(\"i18n\"\)")
+
+
+def qml_function(src, name):
+    """Body of `function NAME(...) { ... }` (comments/strings blanked for
+    brace matching, original text returned)."""
+    clean = strip_comments_and_strings(src)
+    m = re.search(rf"\bfunction\s+{name}\s*\([^)]*\)\s*\{{", clean)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while depth and i < len(clean):
+        depth += {"{": 1, "}": -1}.get(clean[i], 0)
+        i += 1
+    return src[m.end():i - 1]
+
+
+class PanelSafetyTest(unittest.TestCase):
+    """Behaviour the panel must keep; QML cannot run here, so these hold the
+    shape of the code."""
+
+    def setUp(self):
+        self.src = (ROOT / "Panel.qml").read_text()
+        self.clean = strip_comments_and_strings(self.src)
+        self.en = json.loads(EN.read_text())
+
+    def test_setup_sudo_only_runs_after_confirmation(self):
+        # The one call site is the confirmation handler.
+        self.assertEqual(len(re.findall(r"svc\.setupSudo\(", self.clean)), 1)
+        body = qml_function(self.src, "confirmAction")
+        self.assertIsNotNone(body)
+        self.assertIn("svc.setupSudo()", body)
+        ask = qml_function(self.src, "askSetupSudo")
+        self.assertIsNotNone(ask)
+        self.assertNotIn("setupSudo", ask)
+        self.assertRegex(self.src, r'strings\.t\("sshuttle\.sudoConfirm"\)')
+        msg = self.en["sshuttle.sudoConfirm"].lower()
+        for word in ("root", "password", "any program"):
+            self.assertIn(word, msg)
+
+    def test_confirm_dialog_starts_on_cancel(self):
+        self.assertRegex(self.clean, r"onOpenedChanged:\s*if\s*\(opened\)\s*selectedIndex\s*=\s*0")
+
+    def test_error_can_be_cleared(self):
+        self.assertRegex(self.src, r'strings\.t\("sshuttle\.clearError"\)')
+        body = qml_function(self.src, "clearError")
+        self.assertIsNotNone(body)
+        self.assertIn("svc.disconnect()", body)
+
+    def test_switch_does_not_connect_without_sudo(self):
+        body = qml_function(self.src, "togglePower")
+        self.assertIn("needsSudo", body)
+        m = re.search(r"ToggleSwitch\s*\{[^}]*?interactive:\s*([^\n]*)", self.clean)
+        self.assertIsNotNone(m)
+        self.assertIn("needsSudo", m.group(1))
+        self.assertIn("isOn", m.group(1))  # disconnecting stays possible
 
 
 # The only external tools install.sh may use. The test PATH holds nothing

@@ -40,6 +40,15 @@ class TestValidation(Base):
             {"excludes": ["-x"]},
             {"method": "evil"}, {"name": ""}, {"name": "x" * 41},
             {"ssh_identity": "-oFoo=bar"}, {"ssh_identity": "/a b/key"},
+            {"remote": "host\n"}, {"subnets": ["10.0.0.0/8\n"]},
+            {"excludes": ["10.0.0.0/8\n"]},
+            {"remote": "host:\u0661\u0662"}, {"subnets": ["\u0661\u0662.0.0.0/8"]},
+            {"remote": "\u0661.\u0662.\u0663.\u0664"},
+            {"ssh_identity": "/k'x"}, {"ssh_identity": '/k"x'}, {"ssh_identity": "/k\\x"},
+            {"name": "  "}, {"name": "\t "},
+            {"remote": "host:0"}, {"remote": "host:99999"},
+            {"subnets": ["fd00::/129"]}, {"subnets": ["10.0.0.0/8:90-80"]},
+            {"subnets": ["10.0.0.0/8:0"]}, {"subnets": ["10.0.0.0/8:70000"]},
         ]
         for override in bad:
             with self.subTest(override=override):
@@ -110,6 +119,17 @@ class TestCli(Base):
         rc, out = self.run_main(["list"])
         self.assertEqual(rc, 0)
         self.assertEqual(out["profiles"][0]["name"], "w")
+        rc, out = self.run_main(["set-default", "w"])
+        self.assertEqual((rc, out), (0, {"ok": True}))
+        self.assertEqual(ctl.load_store()["default"], "w")
+        rc, out = self.run_main(["set-default", "nope"])
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        rc, out = self.run_main(["delete", "w"])
+        self.assertEqual((rc, out), (0, {"ok": True}))
+        self.assertEqual(ctl.load_store(), {"profiles": [], "default": None})
+        rc, out = self.run_main(["delete"])
+        self.assertEqual(rc, 1)
         rc, out = self.run_main(["save"], "{nope")
         self.assertEqual(rc, 1)
         self.assertFalse(out["ok"])

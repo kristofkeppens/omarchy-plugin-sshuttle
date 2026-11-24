@@ -45,11 +45,11 @@ def _store_path() -> Path:
 # --------------------------------------------------------------------------
 
 _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-_HOST = rf"(?:{_LABEL}(?:\.{_LABEL})*|\d{{1,3}}(?:\.\d{{1,3}}){{3}}|\[[0-9A-Fa-f:.]+\])"
-_REMOTE_RE = re.compile(rf"^(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?({_HOST})(?::(\d{{1,5}}))?$")
+_HOST = rf"(?:{_LABEL}(?:\.{_LABEL})*|[0-9]{{1,3}}(?:\.[0-9]{{1,3}}){{3}}|\[[0-9A-Fa-f:.]+\])"
+_REMOTE_RE = re.compile(rf"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?({_HOST})(?::([0-9]{{1,5}}))?")
 _SUBNET_RE = re.compile(
-    r"^(?P<addr>[0-9A-Fa-f:.]+)(?:/(?P<mask>\d{1,3}))?"
-    r"(?::(?P<p1>\d{1,5})(?:-(?P<p2>\d{1,5}))?)?$"
+    r"(?P<addr>[0-9A-Fa-f:.]+)(?:/(?P<mask>[0-9]{1,3}))?"
+    r"(?::(?P<p1>[0-9]{1,5})(?:-(?P<p2>[0-9]{1,5}))?)?"
 )
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -60,7 +60,7 @@ def _check_port(p, what):
 
 
 def _validate_remote(v):
-    if not isinstance(v, str) or not (m := _REMOTE_RE.match(v)):
+    if not isinstance(v, str) or not (m := _REMOTE_RE.fullmatch(v)):
         raise ProfileError("invalid remote; expected [user@]host[:port]")
     host = m.group(1)
     if host.startswith("["):
@@ -68,7 +68,7 @@ def _validate_remote(v):
             ipaddress.IPv6Address(host[1:-1])
         except ValueError:
             raise ProfileError("invalid IPv6 address in remote")
-    elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host):
+    elif re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){3}", host):
         try:
             ipaddress.IPv4Address(host)
         except ValueError:
@@ -78,7 +78,7 @@ def _validate_remote(v):
 
 
 def _validate_subnet(v):
-    if not isinstance(v, str) or not (m := _SUBNET_RE.match(v)):
+    if not isinstance(v, str) or not (m := _SUBNET_RE.fullmatch(v)):
         raise ProfileError(f"invalid subnet: {v!r}")
     addr, mask = m.group("addr"), m.group("mask")
     try:
@@ -87,7 +87,7 @@ def _validate_subnet(v):
             maxmask = 128
         else:
             # allow shorthand like "0" (as in "0/0")
-            if not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){0,3}", addr):
+            if not re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,3}", addr):
                 raise ValueError
             parts = addr.split(".")
             if any(int(p) > 255 for p in parts):
@@ -114,7 +114,7 @@ def _validate_list(raw, key, default, check):
 def _validate_identity(v):
     if not isinstance(v, str):
         raise ProfileError("ssh_identity must be a string")
-    if v and (v.startswith("-") or re.search(r"\s", v) or _CTRL_RE.search(v)):
+    if v and (v.startswith("-") or re.search(r"[\s'\"\\]", v) or _CTRL_RE.search(v)):
         raise ProfileError("invalid ssh_identity path")
     return v
 
@@ -123,7 +123,7 @@ def validate_profile(raw: object) -> dict:
     if not isinstance(raw, dict):
         raise ProfileError("profile must be an object")
     name = raw.get("name")
-    if not isinstance(name, str) or not 1 <= len(name) <= 40 or _CTRL_RE.search(name):
+    if not isinstance(name, str) or not 1 <= len(name) <= 40 or not name.strip() or _CTRL_RE.search(name):
         raise ProfileError("name must be 1-40 characters without control characters")
     method = raw.get("method", "auto")
     if method not in METHODS:

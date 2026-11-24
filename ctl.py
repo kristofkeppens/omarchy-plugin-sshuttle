@@ -4,7 +4,6 @@
 Stdout is always one JSON object; exit code 0 when ok, 1 otherwise.
 """
 import fcntl
-import getpass
 import ipaddress
 import json
 import os
@@ -528,19 +527,94 @@ def _tool(env_name, default):
     return os.environ.get(env_name) or default
 
 
-def sudo_ready(sshuttle_bin: str) -> bool:
-    """True iff `sudo -n -l <sshuttle>` succeeds, i.e. no password is needed."""
-    path = shutil.which(sshuttle_bin)
-    if path is None:
-        return False
+PROBE_TIMEOUT = 3.0
+_sudo_cache = {}  # resolved sshuttle path -> (monotonic ts, bool)
+
+_ALIAS_RE = re.compile(
+    r"Cmnd_Alias ([A-Z][A-Z0-9_]*) = /usr/bin/env PYTHONPATH=([A-Za-z0-9_./+-]+) "
+    r"([A-Za-z0-9_./+-]+) \*")
+
+
+def _current_user() -> str:
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def parse_rule(text: str, user: str, sshuttle_path: str) -> list:
+    """Strictly validate sshuttle's sudoers text and return the command argv
+    (without the trailing `*`). Raises ProfileError on anything unexpected."""
+    if any(ord(c) < 32 and c != "\n" or ord(c) == 127 for c in text):
+        raise ProfileError("unexpected sudoers rule: control characters")
+    alias = cmd = None
+    rule_seen = False
+    for line in text.split("\n"):
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            if line.startswith("#include"):
+                raise ProfileError("unexpected sudoers rule: include directive")
+            continue
+        if alias is None and (m := _ALIAS_RE.fullmatch(line)):
+            same = m.group(3) == sshuttle_path or \
+                os.path.realpath(m.group(3)) == os.path.realpath(sshuttle_path)
+            if not same:
+                raise ProfileError("unexpected sudoers rule: command is not the resolved sshuttle")
+            alias = m.group(1)
+            cmd = ["/usr/bin/env", f"PYTHONPATH={m.group(2)}", m.group(3)]
+        elif alias is not None and not rule_seen and line == f"{user} ALL=NOPASSWD: {alias}":
+            rule_seen = True
+        else:
+            raise ProfileError(f"unexpected sudoers rule line: {line[:60]!r}")
+    if alias is None or not rule_seen:
+        raise ProfileError("unexpected sudoers rule: missing alias or user rule")
+    return cmd
+
+
+def _generate_rule(timeout: float) -> str:
+    user = _current_user()
+    gen = subprocess.run(
+        [_bin(), "--sudoers-no-modify", "--sudoers-user", user],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    if gen.returncode != 0 or not gen.stdout.strip():
+        raise ProfileError("could not generate sudoers rule: "
+                           + (gen.stderr.strip().splitlines() or ["no output"])[-1])
+    return gen.stdout if gen.stdout.endswith("\n") else gen.stdout + "\n"
+
+
+def _probe_sudo(path: str) -> bool:
     try:
+        cmd = parse_rule(_generate_rule(PROBE_TIMEOUT), _current_user(), path)
         r = subprocess.run(
-            [_tool("SUDO_BIN", "sudo"), "-n", "-l", path],
+            [_tool("SUDO_BIN", "sudo"), "-n", "-l", *cmd, "--firewall"],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+            stderr=subprocess.DEVNULL, timeout=PROBE_TIMEOUT)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return False
     return r.returncode == 0
+
+
+def _sudo_ttl() -> float:
+    try:
+        return float(os.environ.get("SSHUTTLE_PANEL_SUDO_TTL", "30"))
+    except ValueError:
+        return 30.0
+
+
+def sudo_ready(sshuttle_bin: str) -> bool:
+    """True iff sudo would run sshuttle's firewall helper without a password.
+    Cached per sshuttle path (30s) so status polling does not spam sudo."""
+    try:
+        path = shutil.which(sshuttle_bin)
+        if path is None:
+            return False
+        hit = _sudo_cache.get(path)
+        if hit is not None and time.monotonic() - hit[0] < _sudo_ttl():
+            return hit[1]
+        val = _probe_sudo(path)
+        _sudo_cache[path] = (time.monotonic(), val)
+        return val
+    except Exception:
+        return False
 
 
 def _fail(msg):
@@ -552,26 +626,28 @@ def setup_sudo() -> dict:
     if not _installed():
         return _fail(_not_found_msg())
     try:
-        gen = subprocess.run(
-            [_bin(), "--sudoers-no-modify", "--sudoers-user", getpass.getuser()],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        rule = _generate_rule(30)
+        parse_rule(rule, _current_user(), shutil.which(_bin()))
+    except ProfileError as e:
+        return _fail(str(e))
     except (OSError, subprocess.SubprocessError, KeyError) as e:
         return _fail(f"could not generate sudoers rule: {e}")
-    rule = gen.stdout
-    if gen.returncode != 0 or not rule.strip():
-        return _fail("could not generate sudoers rule: "
-                     + (gen.stderr.strip().splitlines() or ["no output"])[-1])
-    if not rule.endswith("\n"):
-        rule += "\n"
     data = rule.encode()  # exactly these bytes are validated and installed
     # Validate on a private copy (0700 dir, 0600 file). The privileged step
     # never reads a file: the same bytes go to `install` on stdin.
-    tmpdir = tempfile.mkdtemp(prefix="sshuttle-panel-")
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="sshuttle-panel-")
+    except OSError as e:
+        return _fail(f"could not create temporary file: {e}")
     try:
         tmp = os.path.join(tmpdir, "sudoers")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+    except OSError as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return _fail(f"could not create temporary file: {e}")
+    try:
         try:
             chk = subprocess.run(
                 [_tool("VISUDO_BIN", "visudo"), "-c", "-f", tmp],
@@ -595,6 +671,7 @@ def setup_sudo() -> dict:
     if inst.returncode != 0:
         detail = inst.stderr.decode("utf-8", "replace").strip().splitlines()
         return _fail("install failed" + (f": {detail[-1]}" if detail else ""))
+    _sudo_cache.clear()
     return {"ok": True, "sudo_ready": sudo_ready(_bin())}
 
 

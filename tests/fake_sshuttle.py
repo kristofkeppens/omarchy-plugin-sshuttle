@@ -5,6 +5,9 @@ import os
 import sys
 import time
 
+if "--sudoers-no-modify" in sys.argv:
+    sys.exit(1)  # no rule; keeps status() probes instant
+
 argv_file = os.environ.get("FAKE_ARGV_FILE")
 if argv_file:
     with open(argv_file, "w") as f:

@@ -1,49 +1,60 @@
-# omarchy-sshuttle-plugin
+# sshuttle for the Omarchy bar
 
 An Omarchy shell bar widget for [sshuttle](https://github.com/sshuttle/sshuttle).
 Omarchy's bar is the Quickshell shell (`omarchy-shell`), not Waybar, so this is
-a plugin with id `sshuttle.panel`. The bar icon shows whether sshuttle is
-connected; clicking it opens a panel to manage profiles and connect or
-disconnect.
+a shell plugin with id `io.github.kristofkeppens.sshuttle`. The bar icon shows
+whether sshuttle is connected; clicking it opens a panel to manage profiles and
+connect or disconnect.
 
 Requirements: Omarchy with `omarchy-shell`, `sshuttle`, `python3`, `pkexec`
 (polkit) and `visudo` (only for the sudo setup below).
 
+**This plugin runs unsandboxed code as you, and its optional sudo setup grants
+root-equivalent access** (see [Passwordless sudo](#passwordless-sudo)). It also
+starts a Python helper (`ctl.py`) and runs `sshuttle`, `sudo`, `pkexec` and
+`visudo`. Read the code before enabling it.
+
 ## Install
 
 ```bash
-./install.sh
+omarchy plugin add https://github.com/kristofkeppens/omarchy-plugin-sshuttle.git --enable
 ```
 
-This symlinks the checkout to `~/.config/omarchy/plugins/sshuttle.panel` and
-asks the shell to rescan plugins (`omarchy-shell shell rescanPlugins`). It
-refuses to replace a real directory or file at that path. Running it again is
-safe.
+Plugins are added disabled so you can review them; `--enable` enables it
+straight away, in the bar's right section. To work on a local checkout
+instead, run `./install.sh`: it symlinks the checkout to
+`~/.config/omarchy/plugins/io.github.kristofkeppens.sshuttle` and asks the
+shell to rescan plugins (`omarchy-shell shell rescanPlugins`). It refuses to
+replace a real directory or file at that path, and is safe to run again.
+
+To remove it: `omarchy plugin remove io.github.kristofkeppens.sshuttle`. That
+does not delete what the plugin created outside its own folder; see
+[Removing everything](#removing-everything).
 
 ## Add it to the bar
 
 Installing the plugin does not put it on the bar. Add it once with:
 
 ```bash
-omarchy plugin enable sshuttle.panel --section right
+omarchy plugin enable io.github.kristofkeppens.sshuttle --section right
 ```
 
-(`omarchy bar put sshuttle.panel --section right` does the same placement.)
+(`omarchy bar put io.github.kristofkeppens.sshuttle --section right` does the same placement.)
 `omarchy bar move` only repositions a widget that is already on the bar; on a
 widget that has not been added yet it fails with
-`could not find widget sshuttle.panel`.
+`could not find widget io.github.kristofkeppens.sshuttle`.
 
 You can also add an entry to the bar layout in `~/.config/omarchy/shell.json`
 yourself (it hot-reloads on save):
 
 ```json
-{"id": "sshuttle.panel", "showLabel": true}
+{"id": "io.github.kristofkeppens.sshuttle", "showLabel": true}
 ```
 
 Valid sections, in the order they run along the bar: `left`, `centerBegin`,
 `center`, `centerEnd`, `right`. To sit beside the clock use `centerBegin` or
 `centerEnd`; putting it in `center` moves the clock off center. Once it is on
-the bar, `omarchy bar move sshuttle.panel --section centerEnd` relocates it
+the bar, `omarchy bar move io.github.kristofkeppens.sshuttle --section centerEnd` relocates it
 without a restart.
 
 Settings (inline keys on the entry):
@@ -204,6 +215,23 @@ shell has: `tr '\0' '\n' < /proc/$(pgrep -o -f omarchy-shell)/environ | grep SSH
 `set-default`, `start [NAME]`, `stop`, `status`, `log`, `setup-sudo`. Each
 prints one JSON object.
 
+## Removing everything
+
+`omarchy plugin remove io.github.kristofkeppens.sshuttle` removes the plugin
+folder. These are created outside it and stay until you remove them:
+
+```bash
+# 1. Disconnect first (panel switch, or: python3 ctl.py stop), so no tunnel is left running.
+# 2. The passwordless sudo rule, if you ran "Set up":
+sudo rm /etc/sudoers.d/sshuttle-panel
+# 3. Your profiles and the plugin's runtime files:
+rm -r ~/.config/sshuttle-panel
+rm -r "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sshuttle-panel"
+```
+
+Step 2 matters most: until it is removed, anything running as you can run
+sshuttle as root without a password.
+
 ## Tests
 
 ```bash
@@ -213,4 +241,4 @@ node --test tests/
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).

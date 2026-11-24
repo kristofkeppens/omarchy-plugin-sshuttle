@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "sshuttle.panel",
+  "id": "io.github.kristofkeppens.sshuttle",
   "name": "sshuttle",
   "version": "0.1.0",
   "author": "Kristof Keppens",

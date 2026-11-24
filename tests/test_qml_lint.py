@@ -90,7 +90,7 @@ class ManifestTest(unittest.TestCase):
     def test_identity(self):
         m = self.m
         self.assertEqual(m["schemaVersion"], 1)
-        self.assertEqual(m["id"], "sshuttle.panel")
+        self.assertEqual(m["id"], "io.github.kristofkeppens.sshuttle")
         self.assertEqual(m["kinds"], ["bar-widget"])
         self.assertEqual(m["entryPoints"], {"barWidget": "Panel.qml"})
         self.assertTrue((ROOT / m["entryPoints"]["barWidget"]).is_file())
@@ -277,7 +277,7 @@ class InstallScriptTest(unittest.TestCase):
         stub = self.bin / "omarchy-shell"
         stub.write_text(f'#!/bin/sh\necho "$@" >> "{self.calls}"\n')
         stub.chmod(0o755)
-        self.target = self.home / ".config" / "omarchy" / "plugins" / "sshuttle.panel"
+        self.target = self.home / ".config" / "omarchy" / "plugins" / "io.github.kristofkeppens.sshuttle"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -323,7 +323,7 @@ class InstallScriptTest(unittest.TestCase):
         self.assertFalse(self.target.is_symlink())
         self.assertEqual((self.target / "keep").read_text(), "mine")
         self.assertEqual(sorted(p.name for p in self.target.iterdir()), ["keep"])
-        self.assertIn("sshuttle.panel", r.stderr)
+        self.assertIn("io.github.kristofkeppens.sshuttle", r.stderr)
 
     def test_refuses_regular_file(self):
         self.target.parent.mkdir(parents=True)

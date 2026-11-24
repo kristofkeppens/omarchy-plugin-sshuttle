@@ -15,8 +15,8 @@ import "Model.js" as Model
 // filled in one pass by fmt() so a "%1" inside a name is never expanded.
 Panel {
   id: root
-  moduleName: "sshuttle.panel"
-  ipcTarget: "sshuttle.panel"
+  moduleName: "io.github.kristofkeppens.sshuttle"
+  ipcTarget: "io.github.kristofkeppens.sshuttle"
 
   // Items inside the panel's lazily built content, null until it first opens.
   readonly property Flickable panelFlick: panel.loadedContent ? panel.loadedContent.panelFlick : null

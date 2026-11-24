@@ -354,6 +354,56 @@ class TestHardening(Base):
         self.assertEqual(mode, 0o600)
 
 
+class TestSshFailureExplained(Base):
+    """Show ssh's own reason, with a hint, not sshuttle's generic last line."""
+
+    mode = "silent"
+    _write_state = TestHardening._write_state
+    _log = TestHardening._log
+
+    REAL_LOG = (
+        "Warning: Permanently added '[jump.example.com]:2222' (ED25519) to the list of known hosts.\n"
+        "alice@jump.example.com: Permission denied (publickey).\n"
+        "c : fatal: failed to establish ssh session (2)\n"
+    )
+
+    def _error(self, log):
+        self._write_state()
+        self._log(log)
+        st = ctl.status()
+        self.assertEqual(st["state"], "error")
+        return st["error"]
+
+    def test_publickey_failure_names_the_cause_and_the_passphrase_hint(self):
+        msg = self._error(self.REAL_LOG)
+        self.assertIn("Permission denied (publickey)", msg)
+        self.assertIn("passphrase", msg)
+        self.assertIn("ssh-add", msg)
+        self.assertLessEqual(len(msg), 500)
+
+    def test_host_key_failure_is_explained(self):
+        msg = self._error("Host key verification failed.\nc : fatal: failed to establish ssh session (2)\n")
+        self.assertIn("Host key verification failed", msg)
+
+    def test_other_ssh_errors_show_the_ssh_line_not_the_generic_one(self):
+        for line in ["ssh: connect to host h port 22: Connection refused",
+                     "ssh: Could not resolve hostname nope: Name or service not known",
+                     "ssh: connect to host h port 22: Connection timed out"]:
+            with self.subTest(line=line):
+                msg = self._error(f"{line}\nc : fatal: failed to establish ssh session (255)\n")
+                self.assertIn(line.split(": ", 1)[1], msg)
+
+    def test_unrecognised_failure_still_shows_last_line(self):
+        msg = self._error("something unexpected happened\nc : fatal: boom\n")
+        self.assertEqual(msg, "c : fatal: boom")
+
+    def test_publickey_line_after_connect_is_not_misread(self):
+        # Only the never-connected path is explained; a post-connect fatal is shown as is.
+        self._write_state(connected=True)
+        self._log("c : Connected to server.\nc : fatal: tproxy failed\n")
+        self.assertEqual(ctl.status()["error"], "c : fatal: tproxy failed")
+
+
 class TestMissingBinary(Base):
     def test_missing_binary_is_error(self):
         with mock.patch.dict(os.environ, {"SSHUTTLE_BIN": "/nonexistent/sshuttle"}):

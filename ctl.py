@@ -439,15 +439,31 @@ def read_log() -> list:
     return text.splitlines()[-50:]
 
 
-def _last_log_line():
-    for line in reversed(read_log()):
-        if line.strip():
-            return line.strip()
-    return None
-
-
 MAX_ERROR = 500
 _FATAL_RE = re.compile(r"\bfatal:")
+
+# ssh's own words for why it could not connect, most specific first. sshuttle
+# only logs "fatal: failed to establish ssh session (N)" after them, which says
+# nothing useful. The panel runs ssh with BatchMode, so it can never prompt.
+_SSH_FAILURES = (
+    (re.compile(r"Permission denied \(publickey"),
+     " If the key has a passphrase, load it first: ssh-add <key> (the panel cannot ask for it)."),
+    (re.compile(r"Host key verification failed"),
+     " Connect once from a terminal to accept the host key."),
+    (re.compile(r"Connection (refused|timed out|reset)|Could not resolve hostname|No route to host|"
+                r"Network is unreachable|Connection closed"), ""),
+)
+
+
+def _explain_failure(lines):
+    """The message for a connection that never came up: ssh's own error line
+    (plus a hint) when the log has a recognisable one, else the last line."""
+    clean = [l.strip() for l in lines if l.strip()]
+    for pattern, hint in _SSH_FAILURES:
+        for line in reversed(clean):
+            if pattern.search(line):
+                return line + hint
+    return clean[-1] if clean else None
 
 
 def _failure_after_connect(lines):
@@ -548,7 +564,7 @@ def status() -> dict:
         had_connected = bool(st.get("connected")) or any(CONNECTED_MARKER in l for l in lines)
         msg = None
         if pst == "gone" and st.get("profile") and _log_path().exists():
-            msg = _failure_after_connect(lines) if had_connected else _last_log_line()
+            msg = _failure_after_connect(lines) if had_connected else _explain_failure(lines)
             msg = msg[:MAX_ERROR] if msg else None
         if msg is None:
             _remove_state()

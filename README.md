@@ -146,6 +146,20 @@ authentication (an ssh-agent with the key loaded, or an unencrypted key, or
 an identity file set on the profile), and make sure the remote's host key is
 already in `~/.ssh/known_hosts` (connect once with plain `ssh` first).
 
+**A passphrase-protected key fails with `Permission denied (publickey)`** even
+though `ssh` works in a terminal, because the terminal can ask for the
+passphrase and the panel cannot. Load the key into the agent once per login:
+
+```bash
+ssh-add ~/.ssh/id_ed25519      # asks for the passphrase once
+ssh-add -l                     # confirm the key is listed
+```
+
+To have ssh load it automatically the first time you use it from a terminal,
+add `AddKeysToAgent yes` to `~/.ssh/config`. The panel's error message names
+this case. The agent must be the one the shell was started with
+(`SSH_AUTH_SOCK`); on Omarchy that is the systemd user agent socket.
+
 ## Troubleshooting
 
 - Press "Show log" in the panel, or run `python3 ctl.py log`.

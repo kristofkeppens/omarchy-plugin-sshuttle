@@ -22,12 +22,19 @@ safe.
 
 ## Add it to the bar
 
+Installing the plugin does not put it on the bar. Add it once with:
+
 ```bash
-omarchy bar move sshuttle.panel --section right
+omarchy plugin enable sshuttle.panel --section right
 ```
 
-or add an entry to the bar layout in `~/.config/omarchy/shell.json` (it
-hot-reloads on save):
+(`omarchy bar put sshuttle.panel --section right` does the same placement.)
+`omarchy bar move` only repositions a widget that is already on the bar; on a
+widget that has not been added yet it fails with
+`could not find widget sshuttle.panel`.
+
+You can also add an entry to the bar layout in `~/.config/omarchy/shell.json`
+yourself (it hot-reloads on save):
 
 ```json
 {"id": "sshuttle.panel", "showLabel": true}
@@ -35,8 +42,9 @@ hot-reloads on save):
 
 Valid sections, in the order they run along the bar: `left`, `centerBegin`,
 `center`, `centerEnd`, `right`. To sit beside the clock use `centerBegin` or
-`centerEnd`; putting it in `center` moves the clock off center. Moving it with
-`omarchy bar move` again relocates it without a restart.
+`centerEnd`; putting it in `center` moves the clock off center. Once it is on
+the bar, `omarchy bar move sshuttle.panel --section centerEnd` relocates it
+without a restart.
 
 Settings (inline keys on the entry):
 

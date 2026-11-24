@@ -49,14 +49,20 @@ Settings (inline keys on the entry):
 ## Using the panel
 
 The status is one of Connected, Connecting, Disconnected or Error. In the error
-state the message (usually the last line of the sshuttle log) is shown and
-stays until you disconnect or connect again. If sshuttle is not installed the
-panel says so.
+state the message (usually the last line of the sshuttle log, or the `fatal:`
+line sshuttle printed after connecting, for example when the firewall step
+fails) is shown and stays until you press "Clear error" on the error card or
+connect again. "Clear error" runs `stop`, which also ends a leftover process.
+If sshuttle is not installed the panel says so.
 
 - The switch in the header connects or disconnects. It connects the selected
-  profile (the default profile, else the first).
+  profile (the default profile, else the first). While passwordless sudo is
+  not set up the switch cannot connect (sshuttle would hang waiting for a
+  password); use "Set up" first. It can always disconnect.
 - Profiles are listed below; select one, mark one as default, add, edit or
-  delete. Names must be unique; saving with an existing name replaces it.
+  delete. Names must be unique: the panel refuses to save a profile under a
+  name another profile already has. (`ctl.py save` on the command line does
+  replace a profile with the same name.)
 - "Show log" displays the last 50 lines of sshuttle's output.
 - If passwordless sudo is not set up the panel shows a "Set up" button, see
   below.
@@ -84,7 +90,9 @@ itself. A background process started from a bar widget has no terminal, so
 the password prompt cannot be answered and the connection would hang.
 Passwordless sudo for sshuttle is therefore required.
 
-The "Set up" button does this:
+The "Set up" button first asks for confirmation (Cancel is preselected): the
+rule lets any program running as your user run commands as root without a
+password, through sshuttle. Only after you confirm it does this:
 
 1. Runs `sshuttle --sudoers-no-modify --sudoers-user YOU` to generate the rule.
 2. Checks the text strictly: it must be exactly a `Cmnd_Alias` for
@@ -92,8 +100,21 @@ The "Set up" button does this:
    `YOU ALL=NOPASSWD: ALIAS` line, with the resolved sshuttle path. Anything
    else is rejected.
 3. Validates it with `visudo -c`.
-4. Installs it with `pkexec install -m 0440 /dev/stdin /etc/sudoers.d/sshuttle-panel`,
+4. Installs it with `pkexec /usr/bin/install -m 0440 /dev/stdin /etc/sudoers.d/sshuttle-panel`,
    which asks for your authorization through polkit.
+
+Whether sudo is ready is checked with
+`sudo -n -l -l /usr/bin/env PYTHONPATH=... /path/to/sshuttle --firewall`
+(the same check `omarchy-dns` uses): it counts as ready only if sudo permits
+that command and the matching rule's `Options:` line shows `!authenticate`,
+that is, the rule is NOPASSWD. A plain `sudo -l` is not enough: the blanket
+`%wheel ALL=(ALL) ALL` rule permits everything but still asks for a password.
+
+The rule names the `PYTHONPATH` of the Python sshuttle runs on (for example
+`/usr/lib/python3.14/site-packages`). After a Python minor-version upgrade
+(3.14 to 3.15) that path changes, the old rule no longer matches, and the
+panel shows "Set up" again. Press it again; the new rule replaces the old
+file.
 
 Security trade-off. This is sshuttle's own rule, and sshuttle warns about it:
 a user who can run sshuttle as root can run other commands as root, for
@@ -121,19 +142,30 @@ already in `~/.ssh/known_hosts` (connect once with plain `ssh` first).
 
 - Press "Show log" in the panel, or run `python3 ctl.py log`.
 - Files, in `$XDG_RUNTIME_DIR/sshuttle-panel/` (normally `/run/user/UID/sshuttle-panel/`):
-  `sshuttle.log` (output of the current/last run, truncated on each start) and
-  `state.json` (pid, profile, start time, and a recorded error if any).
+  `sshuttle.log` (output of the current/last run, truncated on each start),
+  `state.json` (pid, profile, start time, and a recorded error if any) and
+  `sudo.json` (the cached sudo check).
 - A connection that is not up within 30 seconds is stopped and reported as
   `connection timed out after 30s`. Override with the environment variable
   `SSHUTTLE_PANEL_CONNECT_TIMEOUT` (seconds) for the process running `ctl.py`.
 - Stale state: if the panel shows a state that does not match reality, run
-  `python3 ctl.py stop`, or delete `state.json`. A recorded error persists
-  until you disconnect or connect again.
-- "Set up" shown although the rule is installed: the panel probes
-  `sudo -n -l` against the current sshuttle path and caches the result for 30
-  seconds. If sshuttle moved (upgrade, different prefix), set up again.
-- Other environment overrides: `SSHUTTLE_BIN`, `SSHUTTLE_PANEL_CONFIG_DIR`,
-  `SSHUTTLE_PANEL_RUNTIME_DIR`.
+  `python3 ctl.py stop` (or press "Clear error"). Do not delete `state.json`
+  by hand: it holds the pid of a running tunnel, and without it `stop` can no
+  longer find and end that process. A recorded error persists until you clear
+  it or connect again.
+- "Set up" shown although the rule is installed: the panel checks with
+  `sudo -n -l -l` (see above) against the current sshuttle path and caches the
+  answer, ready or not, for 60 seconds in `sudo.json` in the runtime
+  directory. The cache is dropped after "Set up" and whenever a connection
+  fails. If sshuttle moved (upgrade, different prefix) or Python was upgraded,
+  set up again.
+- Environment overrides for the process running `ctl.py`:
+  `SSHUTTLE_BIN` (sshuttle to run), `SUDO_BIN`, `PKEXEC_BIN`, `VISUDO_BIN`
+  (the tools used for the sudo check and setup), `SSHUTTLE_PANEL_CONFIG_DIR`
+  (profiles), `SSHUTTLE_PANEL_RUNTIME_DIR` (state, log, sudo cache; defaults
+  to `$XDG_RUNTIME_DIR/sshuttle-panel`), `SSHUTTLE_PANEL_CONNECT_TIMEOUT`
+  (seconds, default 30) and `SSHUTTLE_PANEL_SUDO_TTL` (seconds the sudo check
+  is cached, default 60).
 - Plugin load problems: check the shell logs, for example
   `journalctl --user -b -g sshuttle`.
 

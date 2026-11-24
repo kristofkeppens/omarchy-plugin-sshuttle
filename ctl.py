@@ -4,6 +4,7 @@
 Stdout is always one JSON object; exit code 0 when ok, 1 otherwise.
 """
 import fcntl
+import getpass
 import ipaddress
 import json
 import os
@@ -469,6 +470,7 @@ def status() -> dict:
     out = {"ok": True, "state": "disconnected", "profile": None, "pid": None,
            "since": None, "error": None,
            "sshuttle_installed": _installed(), "sudo_ready": False}
+    out["sudo_ready"] = out["sshuttle_installed"] and sudo_ready(_bin())
     st = _read_state()
     if st is None:
         if not out["sshuttle_installed"]:
@@ -516,6 +518,85 @@ def status() -> dict:
 
 
 # --------------------------------------------------------------------------
+# Passwordless sudo
+# --------------------------------------------------------------------------
+
+SUDOERS_TARGET = "/etc/sudoers.d/sshuttle-panel"
+
+
+def _tool(env_name, default):
+    return os.environ.get(env_name) or default
+
+
+def sudo_ready(sshuttle_bin: str) -> bool:
+    """True iff `sudo -n -l <sshuttle>` succeeds, i.e. no password is needed."""
+    path = shutil.which(sshuttle_bin)
+    if path is None:
+        return False
+    try:
+        r = subprocess.run(
+            [_tool("SUDO_BIN", "sudo"), "-n", "-l", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _fail(msg):
+    return {"ok": False, "error": msg}
+
+
+def setup_sudo() -> dict:
+    """Install a sudoers rule for sshuttle via pkexec (the only privileged step)."""
+    if not _installed():
+        return _fail(_not_found_msg())
+    try:
+        gen = subprocess.run(
+            [_bin(), "--sudoers-no-modify", "--sudoers-user", getpass.getuser()],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError, KeyError) as e:
+        return _fail(f"could not generate sudoers rule: {e}")
+    rule = gen.stdout
+    if gen.returncode != 0 or not rule.strip():
+        return _fail("could not generate sudoers rule: "
+                     + (gen.stderr.strip().splitlines() or ["no output"])[-1])
+    if not rule.endswith("\n"):
+        rule += "\n"
+    fd, tmp = tempfile.mkstemp(prefix="sshuttle-panel-sudoers-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(rule)
+        os.chmod(tmp, 0o644)  # pkexec's root must read it; it holds no secrets
+        try:
+            chk = subprocess.run(
+                [_tool("VISUDO_BIN", "visudo"), "-c", "-f", tmp],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            return _fail(f"sudoers validation could not run: {e}")
+        if chk.returncode != 0:
+            detail = (chk.stderr.strip() or chk.stdout.strip()).splitlines()
+            return _fail("sudoers validation failed" + (f": {detail[-1]}" if detail else ""))
+        try:
+            inst = subprocess.run(
+                [_tool("PKEXEC_BIN", "pkexec"), "install", "-m", "0440", tmp, SUDOERS_TARGET],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        except OSError as e:
+            return _fail(f"could not run pkexec: {e}")
+        if inst.returncode == 126:
+            return _fail("Authorization cancelled")
+        if inst.returncode != 0:
+            detail = inst.stderr.strip().splitlines()
+            return _fail("install failed" + (f": {detail[-1]}" if detail else ""))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return {"ok": True, "sudo_ready": sudo_ready(_bin())}
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
@@ -553,6 +634,11 @@ def _dispatch(cmd, args):
         return stop()
     if cmd == "status":
         return status()
+    if cmd == "setup-sudo":
+        res = setup_sudo()
+        if not res["ok"]:
+            raise ProfileError(res["error"])
+        return res
     if cmd == "log":
         return {"ok": True, "lines": read_log()}
     raise ProfileError(f"unknown command: {cmd}")

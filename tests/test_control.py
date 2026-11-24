@@ -36,6 +36,7 @@ class Base(unittest.TestCase):
             "SSHUTTLE_PANEL_CONFIG_DIR": self.cfg.name,
             "SSHUTTLE_PANEL_RUNTIME_DIR": os.path.join(self.run_dir.name, "rt"),
             "SSHUTTLE_BIN": FAKE,
+            "SUDO_BIN": "/bin/false",  # never run the real sudo
             "FAKE_MODE": self.mode,
             "FAKE_ARGV_FILE": self.argv_file,
         })

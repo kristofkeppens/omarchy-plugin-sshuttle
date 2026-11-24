@@ -450,6 +450,7 @@ def _start(name) -> dict:
                 argv, start_new_session=True, stdin=subprocess.DEVNULL,
                 stdout=log, stderr=subprocess.STDOUT)
         except OSError as e:
+            _clear_sudo_cache()
             raise ProfileError(f"could not start sshuttle: {e}")
     _children[proc.pid] = proc
     _write_state({"pid": proc.pid, "profile": name, "started": time.time()})
@@ -467,6 +468,13 @@ def _stop() -> dict:
         _terminate(st["pid"])
     _remove_state()
     return {"ok": True}
+
+
+def _record_error(st, msg):
+    """Make a failure sticky (until stop/start) and drop the cached sudo
+    readiness: a failed connect is often sudo asking for a password."""
+    _write_state({**st, "error": msg})
+    _clear_sudo_cache()
 
 
 def status() -> dict:
@@ -502,7 +510,7 @@ def status() -> dict:
             if not out["sshuttle_installed"]:
                 out.update(state="error", error=_not_found_msg())
         else:
-            _write_state({**st, "error": msg})
+            _record_error(st, msg)
             out.update(state="error", error=msg)
         return out
     out["pid"] = pid
@@ -515,7 +523,7 @@ def status() -> dict:
     if isinstance(started, (int, float)) and time.time() - started > _connect_timeout():
         _terminate(pid)
         msg = f"connection timed out after {_connect_timeout():g}s"
-        _write_state({**st, "error": msg})
+        _record_error(st, msg)
         out.update(state="error", error=msg, pid=None)
     return out
 
@@ -532,7 +540,6 @@ def _tool(env_name, default):
 
 
 PROBE_TIMEOUT = 3.0
-_sudo_cache = {}  # resolved sshuttle path -> (monotonic ts, bool)
 
 _ALIAS_RE = re.compile(
     r"Cmnd_Alias ([A-Z][A-Z0-9_]*) = /usr/bin/env PYTHONPATH=([A-Za-z0-9_./+-]+) "
@@ -585,37 +592,90 @@ def _generate_rule(timeout: float) -> str:
     return gen.stdout if gen.stdout.endswith("\n") else gen.stdout + "\n"
 
 
+# `sudo -l CMD` only says the command is permitted, which the blanket %wheel
+# rule answers yes to for everything (and listpw=any lets -n -l pass without a
+# password). The long listing prints the matched entry's tags instead; a
+# NOPASSWD entry shows `!authenticate` on its Options line (sudoers display.c:
+# "    Options: " followed by "%sauthenticate, "). Same check as omarchy-dns.
+_NOPASSWD_RE = re.compile(r"^[ \t]*Options:(?:[^\n]*?[ \t,])?!authenticate(?=,|[ \t]|$)", re.M)
+
+
 def _probe_sudo(path: str) -> bool:
     try:
         cmd = parse_rule(_generate_rule(PROBE_TIMEOUT), _current_user(), path)
         r = subprocess.run(
-            [_tool("SUDO_BIN", "sudo"), "-n", "-l", *cmd, "--firewall"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=PROBE_TIMEOUT)
+            [_tool("SUDO_BIN", "sudo"), "-n", "-l", "-l", *cmd, "--firewall"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            errors="replace", timeout=PROBE_TIMEOUT)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return False
-    return r.returncode == 0
+    return r.returncode == 0 and _NOPASSWD_RE.search(r.stdout or "") is not None
 
 
 def _sudo_ttl() -> float:
     try:
-        return float(os.environ.get("SSHUTTLE_PANEL_SUDO_TTL", "30"))
+        return float(os.environ.get("SSHUTTLE_PANEL_SUDO_TTL", "60"))
     except ValueError:
-        return 30.0
+        return 60.0
+
+
+def _sudo_cache_path() -> Path:
+    return runtime_dir() / "sudo.json"
+
+
+def _read_sudo_cache(path: str):
+    """The cached bool for this sshuttle path, or None if absent/stale/bad."""
+    try:
+        data = json.loads(_sudo_cache_path().read_text())
+        ts, val = data["ts"], data["value"]
+        if data["path"] != path or type(val) is not bool or type(ts) not in (int, float):
+            return None
+        age = time.time() - ts
+        return val if 0 <= age < _sudo_ttl() else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_sudo_cache(path: str, val: bool) -> None:
+    try:
+        d = runtime_dir()
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".sudo-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"path": path, "ts": time.time(), "value": val}, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, _sudo_cache_path())
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass  # caching is best effort
+
+
+def _clear_sudo_cache() -> None:
+    try:
+        _sudo_cache_path().unlink()
+    except OSError:
+        pass
 
 
 def sudo_ready(sshuttle_bin: str) -> bool:
     """True iff sudo would run sshuttle's firewall helper without a password.
-    Cached per sshuttle path (30s) so status polling does not spam sudo."""
+    Status polls each run a fresh process, so the result (True or False) is
+    cached on disk per sshuttle path (SSHUTTLE_PANEL_SUDO_TTL, default 60s)."""
     try:
         path = shutil.which(sshuttle_bin)
         if path is None:
             return False
-        hit = _sudo_cache.get(path)
-        if hit is not None and time.monotonic() - hit[0] < _sudo_ttl():
-            return hit[1]
+        hit = _read_sudo_cache(path)
+        if hit is not None:
+            return hit
         val = _probe_sudo(path)
-        _sudo_cache[path] = (time.monotonic(), val)
+        _write_sudo_cache(path, val)
         return val
     except Exception:
         return False
@@ -665,23 +725,23 @@ def setup_sudo() -> dict:
         shutil.rmtree(tmpdir, ignore_errors=True)
     try:
         inst = subprocess.run(
-            [_tool("PKEXEC_BIN", "pkexec"), "install", "-m", "0440",
+            [_tool("PKEXEC_BIN", "pkexec"), "/usr/bin/install", "-m", "0440",
              "/dev/stdin", SUDOERS_TARGET],
             input=data, capture_output=True)
     except OSError as e:
         return _fail(f"could not run pkexec: {e}")
+    finally:
+        _clear_sudo_cache()  # whatever happened, the next status re-probes
     if inst.returncode == 126:
         return _fail("Authorization cancelled")
     if inst.returncode != 0:
         detail = inst.stderr.decode("utf-8", "replace").strip().splitlines()
         return _fail("install failed" + (f": {detail[-1]}" if detail else ""))
-    _sudo_cache.clear()
     return {"ok": True, "sudo_ready": sudo_ready(_bin())}
 
 
 # --------------------------------------------------------------------------
 # CLI
-# --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 
 MAX_JSON_ARG = 16 * 1024

@@ -35,6 +35,21 @@ def make_rule(path, user=None, alias="SSHUTTLEEF6", cmd=None, tail=""):
 TARGET = "/etc/sudoers.d/sshuttle-panel"
 
 
+def long_listing(cmd, options=None, source="/etc/sudoers.d/sshuttle-panel"):
+    """Shape of real `sudo -l -l CMD` output (sudo 1.9.17, plugins/sudoers
+    display.c: "Sudoers entry: %s", "    Options: ", "%sauthenticate, ",
+    "    Commands:"). NOPASSWD prints as `!authenticate` on the Options line."""
+    out = f"Sudoers entry: {source}\n    RunAsUsers: root\n"
+    if options:
+        out += f"    Options: {options}\n"
+    return out + f"    Commands:\n\t{cmd}\n"
+
+
+# The blanket `%wheel ALL=(ALL:ALL) ALL` rule: permitted, but with a password.
+WHEEL_LISTING = ("Sudoers entry: /etc/sudoers\n    RunAsUsers: ALL\n"
+                 "    RunAsGroups: ALL\n    Commands:\n\tALL\n")
+
+
 def script(path, body):
     Path(path).write_text("#!/bin/sh\n" + body)
     os.chmod(path, 0o755)
@@ -48,8 +63,10 @@ class SudoBase(unittest.TestCase):
         t = Path(self.tmp.name)
         self.rule = make_rule(str(t / "sshuttle"))
         (t / "rule.txt").write_text(self.rule)
-        ctl._sudo_cache.clear()
-        self.addCleanup(ctl._sudo_cache.clear)
+        self.sudo_log = t / "sudo.calls"
+        self.sudo_out = t / "sudo.out"
+        self.sudo_out.write_text(long_listing(
+            f"/usr/bin/env PYTHONPATH={PYPATH} {t / 'sshuttle'} *", "!authenticate"))
         self.pk_log = t / "pkexec.argv"
         self.pk_copy = t / "pkexec.rule"
         self.fakes = {
@@ -61,7 +78,10 @@ class SudoBase(unittest.TestCase):
                 f'for a in "$@"; do printf "%s\\n" "$a"; done > {self.pk_log}\n'
                 f"cat > {self.pk_copy}\n"
                 "exit 0\n"),
-            "SUDO_BIN": script(t / "sudo", "exit 0\n"),
+            # records argv (one call per line) and prints the long listing
+            "SUDO_BIN": script(
+                t / "sudo",
+                f'printf "%s\\n" "$*" >> {self.sudo_log}\ncat {self.sudo_out}\nexit 0\n'),
             "SSHUTTLE_PANEL_RUNTIME_DIR": str(t / "rt"),
             "SSHUTTLE_PANEL_CONFIG_DIR": str(t / "cfg"),
         }
@@ -75,43 +95,189 @@ class SudoBase(unittest.TestCase):
     def pk_argv(self):
         return self.pk_log.read_text().splitlines()
 
-
-class TestSudoReady(SudoBase):
-    def count_sudo(self):
-        self.sudo_log = Path(self.tmp.name) / "sudo.calls"
-        self.replace("SUDO_BIN", f'printf "%s\\n" "$*" >> {self.sudo_log}\nexit 0\n')
+    def sudo_says(self, output, rc=0):
+        self.sudo_out.write_text(output)
+        self.replace("SUDO_BIN",
+                     f'printf "%s\\n" "$*" >> {self.sudo_log}\ncat {self.sudo_out}\nexit {rc}\n')
 
     def calls(self):
         return self.sudo_log.read_text().splitlines() if self.sudo_log.exists() else []
 
-    def test_sudo_ready_true_and_false(self):
-        self.assertTrue(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
-        ctl._sudo_cache.clear()
-        self.replace("SUDO_BIN", "exit 1\n")
-        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+    def cache_file(self):
+        return Path(self.fakes["SSHUTTLE_PANEL_RUNTIME_DIR"]) / "sudo.json"
 
-    def test_probe_argv_ends_with_firewall_and_has_no_star(self):
-        self.count_sudo()
+    def fresh_process(self):
+        """Nothing about sudo readiness may survive in memory between two
+        `ctl.py status` runs; the module is reloaded to prove it."""
+        import importlib
+        importlib.reload(ctl)
+
+
+class TestSudoReady(SudoBase):
+    def cmd(self):
+        return f"/usr/bin/env PYTHONPATH={PYPATH} {self.fakes['SSHUTTLE_BIN']}"
+
+    def test_nopasswd_grant_is_ready(self):
+        self.assertTrue(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_probe_argv_is_long_listing_ending_with_firewall_and_no_star(self):
         ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"])
-        self.assertEqual(self.calls(), [
-            f"-n -l /usr/bin/env PYTHONPATH={PYPATH} {self.fakes['SSHUTTLE_BIN']} --firewall"])
+        self.assertEqual(self.calls(), [f"-n -l -l {self.cmd()} --firewall"])
         self.assertNotIn("*", self.calls()[0])
 
-    def test_cached_within_ttl_then_reprobes_after_expiry(self):
-        self.count_sudo()
+    def test_wheel_blanket_rule_is_not_ready(self):
+        # `sudo -n -l CMD` exits 0 here (the command is permitted), but sudo
+        # would still ask for a password: the old probe's false positive.
+        self.sudo_says(WHEEL_LISTING, 0)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_exit_zero_without_marker_is_not_ready(self):
+        self.sudo_says(long_listing(self.cmd() + " *"), 0)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+        self.cache_file().unlink()
+        self.sudo_says("", 0)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_passwd_tag_is_not_ready(self):
+        self.sudo_says(long_listing(self.cmd() + " *", "authenticate"), 0)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_marker_among_other_options_is_ready(self):
+        self.sudo_says(long_listing(self.cmd() + " *", "setenv, !authenticate"), 0)
+        self.assertTrue(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_marker_but_nonzero_exit_is_not_ready(self):
+        self.sudo_says(long_listing(self.cmd() + " *", "!authenticate"), 1)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    def test_marker_outside_options_line_is_not_ready(self):
+        self.sudo_says("Sudoers entry: /etc/sudoers\n    Commands:\n\t/usr/bin/!authenticate\n", 0)
+        self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
+
+    # ---- on-disk cache: status() runs in a fresh process on every poll ----
+
+    def test_cache_hits_across_fresh_processes(self):
+        self.assertTrue(ctl.status()["sudo_ready"])
+        self.fresh_process()
+        self.assertTrue(ctl.status()["sudo_ready"])
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_cache_hits_across_real_ctl_subprocesses(self):
+        import subprocess
+        ctl_py = str(Path(ctl.__file__).resolve())
+        for _ in range(2):
+            r = subprocess.run([sys.executable, ctl_py, "status"], capture_output=True,
+                               text=True, timeout=30, env={**os.environ})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIs(json.loads(r.stdout)["sudo_ready"], True)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_false_result_is_cached_too(self):
+        self.sudo_says(WHEEL_LISTING, 0)
+        self.assertFalse(ctl.status()["sudo_ready"])
+        self.fresh_process()
+        self.assertFalse(ctl.status()["sudo_ready"])
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_cache_file_private_and_atomic(self):
+        ctl.status()
+        self.assertEqual(self.cache_file().stat().st_mode & 0o777, 0o600)
+        data = json.loads(self.cache_file().read_text())
+        self.assertEqual(data["path"], self.fakes["SSHUTTLE_BIN"])
+        self.assertIs(data["value"], True)
+        leftovers = [p.name for p in self.cache_file().parent.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_default_ttl_is_60s(self):
+        self.assertEqual(ctl._sudo_ttl(), 60.0)
+        ctl.status()
+        data = json.loads(self.cache_file().read_text())
+        data["ts"] -= 59
+        self.cache_file().write_text(json.dumps(data))
+        self.fresh_process()
+        ctl.status()
+        self.assertEqual(len(self.calls()), 1)
+        data["ts"] -= 2  # now 61s old
+        self.cache_file().write_text(json.dumps(data))
+        ctl.status()
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_reprobes_after_ttl_expiry(self):
         with mock.patch.dict(os.environ, {"SSHUTTLE_PANEL_SUDO_TTL": "0.3"}):
             self.assertTrue(ctl.status()["sudo_ready"])
+            self.fresh_process()
             self.assertTrue(ctl.status()["sudo_ready"])
             self.assertEqual(len(self.calls()), 1)
             time.sleep(0.4)
+            self.fresh_process()
             ctl.status()
             self.assertEqual(len(self.calls()), 2)
 
+    def test_cache_for_other_sshuttle_path_is_ignored(self):
+        ctl.status()
+        data = json.loads(self.cache_file().read_text())
+        self.cache_file().write_text(json.dumps({**data, "path": "/usr/bin/other"}))
+        ctl.status()
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_future_timestamp_is_ignored(self):
+        ctl.status()
+        data = json.loads(self.cache_file().read_text())
+        self.cache_file().write_text(json.dumps({**data, "ts": time.time() + 3600}))
+        ctl.status()
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_corrupt_cache_file_is_ignored(self):
+        self.cache_file().parent.mkdir(parents=True, exist_ok=True)
+        bad = ["", "{nope", "[]", '{"path": 1}', '{"value": "yes"}',
+               json.dumps({"path": self.fakes["SSHUTTLE_BIN"], "ts": "x", "value": True}),
+               json.dumps({"path": self.fakes["SSHUTTLE_BIN"], "ts": time.time(), "value": 1})]
+        for i, content in enumerate(bad, 1):
+            with self.subTest(content):
+                self.cache_file().write_text(content)
+                self.assertTrue(ctl.status()["sudo_ready"])
+                self.assertEqual(len(self.calls()), i)
+
     def test_cache_invalidated_by_setup(self):
-        self.count_sudo()
-        ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"])
-        self.assertTrue(ctl.setup_sudo()["ok"])
-        self.assertEqual(len(self.calls()), 2)  # re-probed after install
+        self.sudo_says(WHEEL_LISTING, 0)
+        self.assertFalse(ctl.status()["sudo_ready"])
+        self.sudo_says(long_listing(self.cmd() + " *", "!authenticate"), 0)
+        res = ctl.setup_sudo()
+        self.assertTrue(res["ok"], res)
+        self.assertIs(res["sudo_ready"], True)  # re-probed after install
+        self.assertEqual(len(self.calls()), 2)
+        self.fresh_process()
+        self.assertTrue(ctl.status()["sudo_ready"])
+        self.assertEqual(len(self.calls()), 2)  # the fresh result was cached
+
+    def test_cache_cleared_when_setup_fails(self):
+        ctl.status()
+        self.replace("PKEXEC_BIN", "exit 126\n")
+        self.assertFalse(ctl.setup_sudo()["ok"])
+        self.assertFalse(self.cache_file().exists())
+
+    def test_cache_cleared_when_start_fails(self):
+        ctl.status()
+        self.assertTrue(self.cache_file().exists())
+        ctl.save_profile({"name": "w", "remote": "me@h"})
+        with mock.patch.object(ctl.subprocess, "Popen", side_effect=OSError("boom")):
+            with self.assertRaises(ctl.ProfileError):
+                ctl.start("w")
+        self.assertFalse(self.cache_file().exists())
+
+    def test_cache_cleared_when_connection_fails(self):
+        ctl.status()
+        self.assertTrue(self.cache_file().exists())
+        rt = Path(self.fakes["SSHUTTLE_PANEL_RUNTIME_DIR"])
+        (rt / "sshuttle.log").write_text("Permission denied (publickey).\n")
+        (rt / "state.json").write_text(json.dumps(
+            {"pid": 1234567, "profile": "w", "started": time.time()}))
+        with mock.patch.object(ctl, "sudo_ready", return_value=True):
+            self.assertEqual(ctl.status()["state"], "error")
+        self.assertFalse(self.cache_file().exists())
+
+    def test_no_in_process_cache_remains(self):
+        self.assertFalse(hasattr(ctl, "_sudo_cache"))
 
     def test_timeout_is_false_and_status_does_not_hang(self):
         self.replace("SUDO_BIN", "exec sleep 10\n")
@@ -126,7 +292,6 @@ class TestSudoReady(SudoBase):
             self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
 
     def test_bad_rule_means_not_ready_and_no_sudo_call(self):
-        self.count_sudo()
         (Path(self.tmp.name) / "rule.txt").write_text("Defaults !authenticate\n")
         self.assertFalse(ctl.sudo_ready(self.fakes["SSHUTTLE_BIN"]))
         self.assertEqual(self.calls(), [])
@@ -138,8 +303,8 @@ class TestSudoReady(SudoBase):
 
     def test_status_reports_sudo_ready(self):
         self.assertIs(ctl.status()["sudo_ready"], True)
-        ctl._sudo_cache.clear()
-        self.replace("SUDO_BIN", "exit 1\n")
+        self.cache_file().unlink()
+        self.sudo_says(WHEEL_LISTING, 0)
         self.assertIs(ctl.status()["sudo_ready"], False)
 
 
@@ -187,7 +352,7 @@ class TestSetupSudo(SudoBase):
         res = ctl.setup_sudo()
         self.assertTrue(res["ok"], res)
         argv = self.pk_argv()
-        self.assertEqual(argv, ["install", "-m", "0440", "/dev/stdin", TARGET])
+        self.assertEqual(argv, ["/usr/bin/install", "-m", "0440", "/dev/stdin", TARGET])
         self.assertEqual(self.pk_copy.read_bytes(), self.rule.encode())  # validated bytes via stdin
 
     def test_setup_sudo_passes_user_to_sshuttle(self):

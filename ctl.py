@@ -563,11 +563,15 @@ def setup_sudo() -> dict:
                      + (gen.stderr.strip().splitlines() or ["no output"])[-1])
     if not rule.endswith("\n"):
         rule += "\n"
-    fd, tmp = tempfile.mkstemp(prefix="sshuttle-panel-sudoers-")
+    data = rule.encode()  # exactly these bytes are validated and installed
+    # Validate on a private copy (0700 dir, 0600 file). The privileged step
+    # never reads a file: the same bytes go to `install` on stdin.
+    tmpdir = tempfile.mkdtemp(prefix="sshuttle-panel-")
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(rule)
-        os.chmod(tmp, 0o644)  # pkexec's root must read it; it holds no secrets
+        tmp = os.path.join(tmpdir, "sudoers")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
         try:
             chk = subprocess.run(
                 [_tool("VISUDO_BIN", "visudo"), "-c", "-f", tmp],
@@ -577,22 +581,20 @@ def setup_sudo() -> dict:
         if chk.returncode != 0:
             detail = (chk.stderr.strip() or chk.stdout.strip()).splitlines()
             return _fail("sudoers validation failed" + (f": {detail[-1]}" if detail else ""))
-        try:
-            inst = subprocess.run(
-                [_tool("PKEXEC_BIN", "pkexec"), "install", "-m", "0440", tmp, SUDOERS_TARGET],
-                stdin=subprocess.DEVNULL, capture_output=True, text=True)
-        except OSError as e:
-            return _fail(f"could not run pkexec: {e}")
-        if inst.returncode == 126:
-            return _fail("Authorization cancelled")
-        if inst.returncode != 0:
-            detail = inst.stderr.strip().splitlines()
-            return _fail("install failed" + (f": {detail[-1]}" if detail else ""))
     finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    try:
+        inst = subprocess.run(
+            [_tool("PKEXEC_BIN", "pkexec"), "install", "-m", "0440",
+             "/dev/stdin", SUDOERS_TARGET],
+            input=data, capture_output=True)
+    except OSError as e:
+        return _fail(f"could not run pkexec: {e}")
+    if inst.returncode == 126:
+        return _fail("Authorization cancelled")
+    if inst.returncode != 0:
+        detail = inst.stderr.decode("utf-8", "replace").strip().splitlines()
+        return _fail("install failed" + (f": {detail[-1]}" if detail else ""))
     return {"ok": True, "sudo_ready": sudo_ready(_bin())}
 
 

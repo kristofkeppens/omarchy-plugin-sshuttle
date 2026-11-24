@@ -33,11 +33,11 @@ class SudoBase(unittest.TestCase):
         self.fakes = {
             "SSHUTTLE_BIN": script(t / "sshuttle", f"printf %s '{RULE}'\n"),
             "VISUDO_BIN": script(t / "visudo", "exit 0\n"),
-            # records argv one per line, copies the file given as 2nd-to-last arg
+            # records argv one per line and its stdin
             "PKEXEC_BIN": script(
                 t / "pkexec",
                 f'for a in "$@"; do printf "%s\\n" "$a"; done > {self.pk_log}\n'
-                f'eval "src=\\${{$(($#-1))}}"; cp "$src" {self.pk_copy}\n'
+                f"cat > {self.pk_copy}\n"
                 "exit 0\n"),
             "SUDO_BIN": script(t / "sudo", "exit 0\n"),
             "SSHUTTLE_PANEL_RUNTIME_DIR": str(t / "rt"),
@@ -83,10 +83,8 @@ class TestSetupSudo(SudoBase):
         res = ctl.setup_sudo()
         self.assertTrue(res["ok"], res)
         argv = self.pk_argv()
-        self.assertEqual(argv[:4], ["install", "-m", "0440", argv[3]])
-        self.assertEqual(argv[-1], TARGET)
-        self.assertEqual(self.pk_copy.read_text(), RULE)  # the validated text
-        self.assertNotEqual(argv[3], TARGET)  # installs a temp file, not in /etc
+        self.assertEqual(argv, ["install", "-m", "0440", "/dev/stdin", TARGET])
+        self.assertEqual(self.pk_copy.read_bytes(), RULE.encode())  # validated bytes via stdin
 
     def test_setup_sudo_passes_user_to_sshuttle(self):
         out = Path(self.tmp.name) / "sshuttle.argv"
@@ -102,7 +100,7 @@ class TestSetupSudo(SudoBase):
         ctl.setup_sudo()
         a = out.read_text().splitlines()
         self.assertEqual(a[:2], ["-c", "-f"])
-        self.assertEqual(a[2], self.pk_argv()[3])
+        self.assertNotIn(a[2], self.pk_argv())  # privileged step never sees the temp path
 
     def test_setup_sudo_rejects_when_visudo_fails(self):
         self.replace("VISUDO_BIN", "echo bad syntax >&2\nexit 1\n")
@@ -136,9 +134,21 @@ class TestSetupSudo(SudoBase):
                 self.assertFalse(ctl.setup_sudo()["ok"], name)
         self.assertFalse(self.pk_log.exists())
 
-    def test_tempfile_removed_after_setup(self):
+    def test_tempfile_and_dir_private_and_removed(self):
+        out = Path(self.tmp.name) / "visudo.info"
+        self.replace("VISUDO_BIN",
+                     f'f="$3"; stat -c "%a" "$f" "$(dirname "$f")" > {out}; '
+                     f'dirname "$f" >> {out}\nexit 0\n')
         ctl.setup_sudo()
-        self.assertFalse(os.path.exists(self.pk_argv()[3]))
+        fmode, dmode, d = out.read_text().split()
+        self.assertEqual((fmode, dmode), ("600", "700"))
+        self.assertFalse(os.path.exists(d))
+
+    def test_tempfile_modified_after_validation_cannot_influence_install(self):
+        self.replace("VISUDO_BIN", 'printf "evil ALL=(ALL) NOPASSWD: ALL\\n" >> "$3"\nexit 0\n')
+        res = ctl.setup_sudo()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.pk_copy.read_bytes(), RULE.encode())
 
     def test_cli_setup_sudo(self):
         import io

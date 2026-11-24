@@ -4,6 +4,17 @@ import "Model.js" as Model
 
 // Talks to ctl.py. Every call is an argv list (never a shell string); profile
 // names and the `save` profile JSON are passed as separate argv elements.
+//
+// Errors are kept in two independent properties so a status poll can never
+// wipe a command failure:
+//   commandError  set when a user-initiated command (connect, disconnect,
+//                 save, delete, set-default, setup-sudo) fails. Cleared only
+//                 when the next user-initiated command starts, or by
+//                 dismissError(). Status polls and internal follow-up reads
+//                 never touch it.
+//   status.error  the helper-reported error of the latest status poll
+//                 (statusError holds a failed poll itself).
+// lastError is a read-only convenience binding over both (commandError wins).
 // Helper output is untrusted: only known fields are copied, with bounded sizes.
 Item {
   id: root
@@ -16,7 +27,9 @@ Item {
   })
   property var profiles: []
   property string defaultProfile: ""
-  property string lastError: ""
+  property string commandError: ""
+  property string statusError: ""
+  readonly property string lastError: commandError !== "" ? commandError : (statusError !== "" ? statusError : (status.error || ""))
   property var logLines: []
 
   readonly property bool busy: _cmdActive || _queue.length > 0
@@ -26,6 +39,7 @@ Item {
   property var _queue: []
   property var _job: null
   property bool _refreshAgain: false
+  property bool _timedOut: false
   property string _statusOutput: ""
   property string _cmdOutput: ""
 
@@ -45,11 +59,15 @@ Item {
 
   function applyStatus(result) {
     if (!result.ok) {
-      lastError = clip(result.error || "Status error", 500)
+      statusError = clip(result.error || "Status error", 500)
       return
     }
+    statusError = ""
     status = Model.sanitizeStatus(result)
-    lastError = status.error || ""
+  }
+
+  function dismissError() {
+    commandError = ""
   }
 
   function clip(value, max) {
@@ -61,9 +79,10 @@ Item {
 
   // args: argv after ctl.py; handler(result, job);
   // done: optional caller callback receiving the parsed result.
-  function enqueue(args, handler, done, timeoutMs) {
+  // internal: follow-up reads that must not clear a visible commandError.
+  function enqueue(args, handler, done, timeoutMs, internal) {
     var q = _queue.slice()
-    q.push({ args: args, handler: handler, done: done, timeoutMs: timeoutMs || 60000 })
+    q.push({ args: args, handler: handler, done: done, timeoutMs: timeoutMs || 60000, internal: internal === true })
     _queue = q
     runNext()
   }
@@ -75,6 +94,8 @@ Item {
     _queue = q
     _cmdActive = true
     _cmdOutput = ""
+    _timedOut = false
+    if (!_job.internal) commandError = ""
     cmdProcess.command = ["python3", ctlPath].concat(_job.args)
     cmdProcess.running = true
     cmdWatchdog.interval = _job.timeoutMs
@@ -88,10 +109,20 @@ Item {
     _cmdActive = false
     var result = Model.parseResult(_cmdOutput)
     if (exitCode !== 0 && result.ok) result = { ok: false, error: "Helper failed" }
-    if (!result.ok) lastError = clip(result.error || "Helper failed", 500)
+    if (_timedOut) result = { ok: false, error: "Helper timed out" }
+    if (!result.ok) commandError = clip(result.error || "Helper failed", 500)
     if (job) {
-      if (job.handler) job.handler(result, job)
-      if (job.done) job.done({ ok: result.ok, error: result.ok ? "" : clip(result.error, 500) })
+      // A throwing callback must never wedge the queue.
+      try {
+        if (job.handler) job.handler(result, job)
+      } catch (e) {
+        console.warn("sshuttle service handler failed:", e)
+      }
+      try {
+        if (job.done) job.done({ ok: result.ok, error: result.ok ? "" : clip(result.error, 500) })
+      } catch (e) {
+        console.warn("sshuttle service callback failed:", e)
+      }
     }
     runNext()
   }
@@ -109,7 +140,7 @@ Item {
       }
       profiles = next
       defaultProfile = typeof r.default === "string" ? clip(r.default, 40) : ""
-    })
+    }, null, 0, true)
   }
 
   function connect(name) {
@@ -144,7 +175,7 @@ Item {
   function loadLog() {
     enqueue(["log"], function (r) {
       if (r.ok) logLines = Model.sanitizeLines(r.lines)
-    })
+    }, null, 0, true)
   }
 
   // Plumbing ---------------------------------------------------------------
@@ -163,14 +194,29 @@ Item {
     id: statusWatchdog
     interval: 15000
     repeat: false
-    onTriggered: if (statusProcess.running) statusProcess.running = false
+    onTriggered: {
+      if (statusProcess.running) {
+        statusProcess.running = false
+      } else {
+        // Never started or never reported exit: do not leave polling wedged.
+        root.statusError = "Helper timed out"
+        if (root._refreshAgain) {
+          root._refreshAgain = false
+          root.refresh()
+        }
+      }
+    }
   }
 
   Timer {
     id: cmdWatchdog
     interval: 60000
     repeat: false
-    onTriggered: if (cmdProcess.running) cmdProcess.running = false
+    onTriggered: {
+      root._timedOut = true
+      if (cmdProcess.running) cmdProcess.running = false  // emits exited -> finishCommand
+      else if (root._cmdActive) root.finishCommand(-1)    // spawn failure: no exited signal
+    }
   }
 
   Component.onCompleted: refreshProfiles()

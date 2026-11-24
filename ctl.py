@@ -66,7 +66,7 @@ def _check_port(p, what):
 
 
 def _validate_remote(v):
-    if not isinstance(v, str) or not (m := _REMOTE_RE.fullmatch(v)):
+    if not isinstance(v, str) or len(v) > 300 or not (m := _REMOTE_RE.fullmatch(v)):
         raise ProfileError("invalid remote; expected [user@]host[:port]")
     host = m.group(1)
     if host.startswith("["):
@@ -114,12 +114,16 @@ def _validate_list(raw, key, default, check):
     v = raw.get(key, default)
     if not isinstance(v, list):
         raise ProfileError(f"{key} must be a list")
+    if len(v) > 200 or any(isinstance(x, str) and len(x) > 100 for x in v):
+        raise ProfileError(f"{key} has too many or too long entries")
     return [check(x) for x in v]
 
 
 def _validate_identity(v):
     if not isinstance(v, str):
         raise ProfileError("ssh_identity must be a string")
+    if len(v) > 4096:
+        raise ProfileError("ssh_identity too long")
     if v and (v.startswith("-") or re.search(r"[\s'\"\\]", v) or _CTRL_RE.search(v)):
         raise ProfileError("invalid ssh_identity path")
     return v

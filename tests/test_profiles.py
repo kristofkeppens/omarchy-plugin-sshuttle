@@ -135,6 +135,14 @@ class TestCli(Base):
         self.assertFalse(out["ok"])
         self.assertIn("error", out)
 
+    def test_length_limits(self):
+        base = {"name": "a", "remote": "h"}
+        for bad in ({"remote": "h" * 301}, {"subnets": ["10.0.0.0/8"] * 201},
+                    {"subnets": ["1" * 101]}, {"ssh_identity": "/" + "k" * 4096}):
+            with self.assertRaises(ctl.ProfileError):
+                ctl.validate_profile({**base, **bad})
+        ctl.validate_profile({**base, "ssh_identity": "/" + "k" * 4095, "subnets": ["10.0.0.0/8"] * 200})
+
     def test_save_json_arg_never_reads_stdin(self):
         class Boom:
             def read(self):

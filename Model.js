@@ -24,6 +24,17 @@ function stateKey(status) {
   return "disconnected"
 }
 
+// Structured pieces so the UI can build a translated summary.
+function summaryParts(profile) {
+  var p = profile || {}
+  var subnets = Array.isArray(p.subnets) ? p.subnets : []
+  return {
+    remote: String(p.remote || ""),
+    subnetCount: subnets.length,
+    allTraffic: subnets.length === 0 || (subnets.length === 1 && subnets[0] === "0/0")
+  }
+}
+
 function profileSummary(profile) {
   var p = profile || {}
   var subnets = Array.isArray(p.subnets) ? p.subnets : []
@@ -73,6 +84,8 @@ function clip(value, max) {
 }
 
 // Helper output is untrusted: copy only known fields with bounded sizes.
+// Caps match the limits ctl.py enforces: name 40, remote 300, ssh_identity 4096,
+// 200 list entries of at most 100 characters each.
 function sanitizeProfile(raw) {
   if (!raw || typeof raw !== "object") return null
   var methods = ["auto", "nft", "nat", "tproxy"]
@@ -84,7 +97,7 @@ function sanitizeProfile(raw) {
     dns: raw.dns === true,
     method: methods.indexOf(raw.method) >= 0 ? raw.method : "auto",
     disable_ipv6: raw.disable_ipv6 === true,
-    ssh_identity: clip(raw.ssh_identity, 500)
+    ssh_identity: clip(raw.ssh_identity, 4096)
   }
 }
 
@@ -122,7 +135,7 @@ function sanitizeLines(lines) {
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    parseResult: parseResult, stateKey: stateKey, profileSummary: profileSummary,
+    parseResult: parseResult, stateKey: stateKey, profileSummary: profileSummary, summaryParts: summaryParts,
     formToProfile: formToProfile, profileToForm: profileToForm,
     sanitizeProfile: sanitizeProfile, sanitizeStatus: sanitizeStatus, sanitizeLines: sanitizeLines
   }

@@ -64,3 +64,22 @@ test("profileToForm round trip", () => {
   }
   assert.deepStrictEqual(Model.profileToForm(Model.formToProfile(f)), f)
 })
+
+test("summaryParts", () => {
+  assert.deepStrictEqual(Model.summaryParts({ remote: "me@h", subnets: ["0/0"] }), { remote: "me@h", subnetCount: 1, allTraffic: true })
+  assert.deepStrictEqual(Model.summaryParts({ remote: "me@h", subnets: [] }), { remote: "me@h", subnetCount: 0, allTraffic: true })
+  assert.deepStrictEqual(Model.summaryParts({ remote: "h", subnets: ["10.0.0.0/8", "0/0"] }), { remote: "h", subnetCount: 2, allTraffic: false })
+  assert.deepStrictEqual(Model.summaryParts(null), { remote: "", subnetCount: 0, allTraffic: true })
+})
+
+test("sanitizeProfile keeps a maximal valid profile unchanged", () => {
+  const p = {
+    name: "n".repeat(40),
+    remote: "u".repeat(60) + "@" + "h".repeat(230) + ":65535",
+    subnets: Array.from({ length: 200 }, () => "s".repeat(100)),
+    excludes: Array.from({ length: 200 }, () => "e".repeat(100)),
+    dns: true, method: "tproxy", disable_ipv6: true,
+    ssh_identity: "/" + "k".repeat(4000)
+  }
+  assert.deepStrictEqual(Model.sanitizeProfile(p), p)
+})

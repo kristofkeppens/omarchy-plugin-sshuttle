@@ -251,6 +251,16 @@ class PanelSafetyTest(unittest.TestCase):
         self.assertIn("needsSudo", m.group(1))
         self.assertIn("isOn", m.group(1))  # disconnecting stays possible
 
+    def test_service_polls_fast_only_while_open(self):
+        m = re.search(r"Service\s*\{[^}]*\}", self.clean)
+        self.assertIsNotNone(m)
+        self.assertRegex(m.group(0), r"\bfastPolling:\s*root\.opened\b")
+
+    def test_stats_strings_are_translated(self):
+        for key in ("sshuttle.stats.download", "sshuttle.stats.upload", "sshuttle.stats.total"):
+            self.assertRegex(self.src, r'strings\.t\("' + re.escape(key) + r'"\)', key)
+        self.assertIn("%1", self.en["sshuttle.stats.total"])
+
 
 # The only external tools install.sh may use. The test PATH holds nothing
 # else, so the real omarchy-shell (in /usr/bin) can never be reached.

@@ -7,7 +7,8 @@ whether sshuttle is connected; clicking it opens a panel to manage profiles and
 connect or disconnect.
 
 Requirements: Omarchy with `omarchy-shell`, `sshuttle`, `python3`, `pkexec`
-(polkit) and `visudo` (only for the sudo setup below).
+(polkit), `visudo` (only for the sudo setup below) and `ss` from iproute2
+(only for the traffic statistics).
 
 **This plugin runs unsandboxed code as you, and its optional sudo setup grants
 root-equivalent access** (see [Passwordless sudo](#passwordless-sudo)). It also
@@ -85,6 +86,23 @@ If sshuttle is not installed the panel says so.
 - "Show log" displays the last 50 lines of sshuttle's output.
 - If passwordless sudo is not set up the panel shows a "Set up" button, see
   below.
+
+### Traffic statistics
+
+While connected, a card under the header shows the current download and
+upload rate, the total downloaded and uploaded since this connection started,
+and a graph of the last two minutes (download filled in the accent colour,
+upload as a dimmer line).
+
+- The numbers are the encrypted bytes of sshuttle's ssh connection, protocol
+  overhead included. They are not split per app, subnet or profile.
+- Totals restart from zero when you reconnect. The graph is kept in memory
+  only: it covers about two minutes and starts empty again if the plugin
+  reloads.
+- While the panel is open the status refreshes every second so the numbers
+  move; when it is closed it goes back to `refreshIntervalSec`.
+- The counters are read with `ss` (iproute2), without root. If `ss` is missing
+  or the connection cannot be found, the card is simply not shown.
 
 ## Profile fields
 

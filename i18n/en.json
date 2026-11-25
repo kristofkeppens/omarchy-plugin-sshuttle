@@ -58,5 +58,8 @@
   "sshuttle.tooltip.connecting": "sshuttle: connecting (%1)",
   "sshuttle.tooltip.disconnected": "sshuttle: disconnected",
   "sshuttle.tooltip.error": "sshuttle: %1",
-  "sshuttle.tooltip.unavailable": "sshuttle: not installed"
+  "sshuttle.tooltip.unavailable": "sshuttle: not installed",
+  "sshuttle.stats.download": "Download",
+  "sshuttle.stats.upload": "Upload",
+  "sshuttle.stats.total": "Total %1"
 }

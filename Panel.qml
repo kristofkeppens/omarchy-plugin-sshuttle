@@ -365,6 +365,8 @@ Panel {
   Service {
     id: svc
     refreshIntervalSec: root.refreshIntervalSec
+    // 1s polling only while someone is looking at the stats.
+    fastPolling: root.opened
   }
 
   // A gentle pulse on the bar glyph while the tunnel comes up. Two short
@@ -589,6 +591,11 @@ Panel {
                 }
               }
             }
+          }
+
+          // Hidden, not zeroed, when the counters are unknown. Not a cursor row.
+          TrafficCard {
+            visible: root.page === "" && root.stateKey === "connected" && svc.rxTotal !== null
           }
 
           Card {
@@ -926,6 +933,183 @@ Panel {
       Column {
         id: extraColumn
         Layout.fillWidth: true
+      }
+    }
+  }
+
+  // Current rates, totals since connecting, and a graph of the last two
+  // minutes: download filled in the accent colour, upload as a dimmer line.
+  // Display only: no cursor row, no animation.
+  component TrafficCard: BorderSurface {
+    id: traffic
+    readonly property color rxColor: Commons.Color.accent
+    readonly property color txColor: root.dim
+
+    function num(value, decimals) { return Commons.I18n.formatNumber(value, decimals) }
+    // The theme can change while the panel is open.
+    onRxColorChanged: graph.requestPaint()
+    onTxColorChanged: graph.requestPaint()
+
+    width: parent ? parent.width : implicitWidth
+    implicitHeight: trafficContent.implicitHeight + Style.space(16)
+    radius: Style.cornerRadius
+    color: "transparent"
+    borderSpec: Border.controlSpec("normal", root.foreground, Commons.Color.accent)
+
+    ColumnLayout {
+      id: trafficContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(8)
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.alignment: Qt.AlignTop
+          spacing: Style.space(2)
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: strings.t("sshuttle.stats.download")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: Model.formatRate(svc.rxRate, traffic.num)
+            color: traffic.rxColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            font.bold: true
+            elide: Text.ElideRight
+          }
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            text: root.fmt(strings.t("sshuttle.stats.total"), Model.formatBytes(svc.rxTotal, traffic.num))
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
+        }
+
+        ColumnLayout {
+          Layout.fillWidth: true
+          Layout.alignment: Qt.AlignTop
+          spacing: Style.space(2)
+
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            text: strings.t("sshuttle.stats.upload")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideLeft
+          }
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            text: Model.formatRate(svc.txRate, traffic.num)
+            color: traffic.txColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.heading
+            font.bold: true
+            elide: Text.ElideLeft
+          }
+          Text {
+            textFormat: Text.PlainText
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignRight
+            text: root.fmt(strings.t("sshuttle.stats.total"), Model.formatBytes(svc.txTotal, traffic.num))
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideLeft
+          }
+        }
+      }
+
+      Canvas {
+        id: graph
+        Layout.fillWidth: true
+        Layout.preferredHeight: Style.space(48)
+        renderStrategy: Canvas.Cooperative
+
+        // Points are 0..1 with y = 1 the largest value; the canvas grows
+        // downwards, so y is flipped here. Inset by half a line so strokes at
+        // the edges are not cut off.
+        function trace(ctx, points, inset) {
+          var w = Math.max(0, width - 2 * inset)
+          var h = Math.max(0, height - 2 * inset)
+          for (var i = 0; i < points.length; i++) {
+            var px = inset + points[i].x * w
+            var py = inset + (1 - points[i].y) * h
+            if (i === 0) ctx.moveTo(px, py)
+            else ctx.lineTo(px, py)
+          }
+        }
+
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.reset()
+          if (width <= 0 || height <= 0) return
+          var series = Model.graphSeries(svc.trafficSamples, Date.now())
+          var line = Math.max(1, Style.spaceReal(1.5))
+          var inset = line / 2
+          ctx.lineJoin = "round"
+          ctx.lineCap = "round"
+          ctx.lineWidth = line
+
+          if (series.rx.length >= 2) {
+            var w = Math.max(0, width - 2 * inset)
+            var first = series.rx[0]
+            var last = series.rx[series.rx.length - 1]
+            ctx.beginPath()
+            trace(ctx, series.rx, inset)
+            ctx.lineTo(inset + last.x * w, height)
+            ctx.lineTo(inset + first.x * w, height)
+            ctx.closePath()
+            ctx.globalAlpha = 0.25
+            ctx.fillStyle = traffic.rxColor
+            ctx.fill()
+            ctx.globalAlpha = 1
+
+            ctx.beginPath()
+            trace(ctx, series.rx, inset)
+            ctx.strokeStyle = traffic.rxColor
+            ctx.stroke()
+          }
+
+          if (series.tx.length >= 2) {
+            ctx.beginPath()
+            trace(ctx, series.tx, inset)
+            ctx.strokeStyle = traffic.txColor
+            ctx.stroke()
+          }
+        }
+
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+
+        Connections {
+          target: svc
+          function onTrafficSamplesChanged() { graph.requestPaint() }
+        }
       }
     }
   }

@@ -595,7 +595,7 @@ Panel {
 
           // Hidden, not zeroed, when the counters are unknown. Not a cursor row.
           TrafficCard {
-            visible: root.page === "" && root.stateKey === "connected" && svc.rxTotal !== null
+            visible: root.page === "" && root.stateKey === "connected" && svc.rxTotal !== null && svc.txTotal !== null
           }
 
           Card {

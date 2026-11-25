@@ -104,7 +104,6 @@ class SsBase(Base):
         self.assertTrue(wait_for(lambda: ctl.status()["state"] == "connected"))
 
 
-
 class TestStatus(SsBase):
     def assert_connected_without_counters(self):
         with mock.patch.object(ctl, "descendant_pids", return_value={4242}):
@@ -150,7 +149,6 @@ class TestStatus(SsBase):
         self.assertIsNone(st["rx_bytes"])
         self.assertIsNone(st["tx_bytes"])
         self.assertFalse(os.path.exists(self.log))
-
 
 
 class TestStatusConnecting(SsBase):

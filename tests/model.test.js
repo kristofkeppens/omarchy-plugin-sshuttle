@@ -124,7 +124,7 @@ test("appendSample trims by age and count without mutating its input", () => {
   assert.deepStrictEqual(out, [{ t: 130000, rx: 2, tx: 2, since: 5 }])
   assert.deepStrictEqual(old, [{ t: 0, rx: 1, tx: 1, since: 5 }])
   let s = []
-  for (let i = 0; i < 300; i++) s = JSON.parse(JSON.stringify(raw.appendSample(s, conn(i, i, 5), i * 100)))
+  for (let i = 0; i < 300; i++) s = JSON.parse(JSON.stringify(raw.appendSample(s, conn(i, i, 5), i * 500)))
   assert.strictEqual(s.length, 200)
   assert.strictEqual(s[199].rx, 299)
   assert.strictEqual(s[0].rx, 100)
@@ -172,4 +172,24 @@ test("graphSeries stays finite for idle, single and degenerate input", () => {
   const same = Model.graphSeries([{ t: 5, rx: 0, tx: 0 }, { t: 5, rx: 99, tx: 99 }], 5)
   for (const p of same.rx.concat(same.tx)) assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y))
   assert.ok(Number.isFinite(same.max))
+})
+
+test("appendSample replaces the last sample when polls land less than 500 ms apart", () => {
+  const first = [{ t: 10000, rx: 100, tx: 10, since: 5 }]
+  const near = Model.appendSample(first, conn(150, 20, 5), 10100)
+  assert.deepStrictEqual(near, [{ t: 10100, rx: 150, tx: 20, since: 5 }])
+  assert.strictEqual(Model.appendSample(first, conn(150, 20, 5), 10499).length, 1)
+  assert.strictEqual(Model.appendSample(first, conn(150, 20, 5), 10500).length, 2)
+  assert.deepStrictEqual(Model.appendSample(first, conn(50, 20, 5), 10100), [{ t: 10100, rx: 50, tx: 20, since: 5 }])
+  assert.deepStrictEqual(Model.appendSample(first, conn(150, 20, 6), 10100), [{ t: 10100, rx: 150, tx: 20, since: 6 }])
+  assert.deepStrictEqual(first, [{ t: 10000, rx: 100, tx: 10, since: 5 }])
+})
+
+test("formatBytes promotes to the next unit when rounding reaches 1000", () => {
+  const fmt = (v, d) => v.toFixed(d)
+  assert.strictEqual(Model.formatBytes(999999, fmt), "1.0 MB")
+  assert.strictEqual(Model.formatBytes(999999999, fmt), "1.0 GB")
+  assert.strictEqual(Model.formatBytes(999000, fmt), "999.0 KB")
+  assert.strictEqual(Model.formatBytes(1e6, fmt), "1.0 MB")
+  assert.strictEqual(Model.formatRate(999999, fmt), "1.0 MB/s")
 })

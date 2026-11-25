@@ -138,6 +138,7 @@ function counter(value) {
 var WINDOW_MS = 120000
 var MAX_SAMPLES = 200
 var MIN_SCALE = 10000
+var MIN_GAP_MS = 500
 
 // Returns a new array; the input is never modified.
 function appendSample(samples, status, nowMs) {
@@ -153,6 +154,9 @@ function appendSample(samples, status, nowMs) {
   for (var i = 0; i < prev.length; i++) {
     if (prev[i].t >= cutoff) out.push(prev[i])
   }
+  // A poll landing right after another (e.g. a refresh on panel open) would
+  // give a spiky rate: replace the last sample instead of appending.
+  if (last && nowMs - last.t < MIN_GAP_MS && out.length > 0 && out[out.length - 1] === last) out.pop()
   out.push(next)
   return out.length > MAX_SAMPLES ? out.slice(out.length - MAX_SAMPLES) : out
 }
@@ -181,7 +185,7 @@ function formatBytes(n, formatNumber) {
   do {
     v = v / 1000
     i++
-  } while (v >= 1000 && i < units.length - 1)
+  } while (Math.round(v * 10) / 10 >= 1000 && i < units.length - 1)
   return formatNumber(v, 1) + " " + units[i]
 }
 

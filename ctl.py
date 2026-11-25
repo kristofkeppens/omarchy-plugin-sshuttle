@@ -560,9 +560,85 @@ def _record_error(st, msg):
     _clear_sudo_cache()
 
 
+# --------------------------------------------------------------------------
+# Traffic counters
+# --------------------------------------------------------------------------
+
+_SS_PID_RE = re.compile(r"pid=(\d+)")
+_SS_SENT_RE = re.compile(r"\bbytes_sent:(\d+)")
+_SS_RECV_RE = re.compile(r"\bbytes_received:(\d+)")
+
+
+def descendant_pids(root: int) -> set:
+    """All descendants of `root` (not `root` itself), from /proc children lists."""
+    found = set()
+    todo = [root]
+    while todo:
+        pid = todo.pop()
+        try:
+            tasks = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            continue
+        for tid in tasks:
+            try:
+                kids = Path(f"/proc/{pid}/task/{tid}/children").read_text().split()
+            except OSError:
+                continue
+            for k in kids:
+                if k.isdigit() and int(k) not in found:
+                    found.add(int(k))
+                    todo.append(int(k))
+    found.discard(root)
+    return found
+
+
+def parse_ss_counters(text: str, pids: set):
+    """(rx, tx) bytes of the `ss -i -p` record owned by one of `pids`, else None.
+
+    A record is an unindented summary line plus indented detail lines.
+    """
+    records = []
+    for line in text.splitlines():
+        if line[:1].isspace():
+            if records:
+                records[-1][1].append(line)
+        elif line.strip():
+            records.append((line, []))
+    best = None
+    for summary, details in records:
+        if not any(int(m) in pids for m in _SS_PID_RE.findall(summary)):
+            continue
+        detail = " ".join(details)
+        sent = _SS_SENT_RE.search(detail)
+        recv = _SS_RECV_RE.search(detail)
+        if not sent or not recv:
+            continue
+        tx, rx = int(sent.group(1)), int(recv.group(1))
+        if best is None or tx + rx > best[0]:
+            best = (tx + rx, rx, tx)
+    return (best[1], best[2]) if best else None
+
+
+def read_traffic(client_pid: int):
+    """Byte counters of sshuttle's ssh connection, or None; never raises."""
+    try:
+        pids = descendant_pids(client_pid)
+        if not pids:
+            return None
+        res = subprocess.run(
+            [_tool("SS_BIN", "ss"), "-H", "-t", "-n", "-i", "-p", "state", "established"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=1.0)
+        if res.returncode != 0:
+            return None
+        return parse_ss_counters(res.stdout, pids)
+    except Exception:
+        return None
+
+
 def status() -> dict:
     out = {"ok": True, "state": "disconnected", "profile": None, "pid": None,
-           "since": None, "error": None,
+           "since": None, "error": None, "rx_bytes": None, "tx_bytes": None,
            "sshuttle_installed": _installed(), "sudo_ready": False}
     out["sudo_ready"] = out["sshuttle_installed"] and sudo_ready(_bin())
     st = _read_state()
@@ -604,6 +680,9 @@ def status() -> dict:
         if not st.get("connected"):
             _write_state({**st, "connected": True})
         out["state"] = "connected"
+        counters = read_traffic(pid)
+        if counters is not None:
+            out["rx_bytes"], out["tx_bytes"] = counters
         return out
     out["state"] = "connecting"
     if isinstance(started, (int, float)) and time.time() - started > _connect_timeout():

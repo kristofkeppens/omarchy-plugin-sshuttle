@@ -32,6 +32,14 @@ Item {
   readonly property string lastError: commandError !== "" ? commandError : (statusError !== "" ? statusError : (status.error || ""))
   property var logLines: []
 
+  // Traffic stats: only meaningful while connected; reset otherwise.
+  property var trafficSamples: []
+  property real rxRate: 0
+  property real txRate: 0
+  property var rxTotal: null
+  property var txTotal: null
+  property bool fastPolling: false
+
   readonly property bool busy: _cmdActive || _queue.length > 0
   readonly property string ctlPath: decodeURIComponent(String(Qt.resolvedUrl("ctl.py")).replace(/^file:\/\//, ""))
 
@@ -64,6 +72,12 @@ Item {
     }
     statusError = ""
     status = Model.sanitizeStatus(result)
+    trafficSamples = Model.appendSample(trafficSamples, status, Date.now())
+    var r = Model.rates(trafficSamples)
+    rxRate = r.rx
+    txRate = r.tx
+    rxTotal = status.rx_bytes
+    txTotal = status.tx_bytes
   }
 
   function dismissError() {
@@ -182,7 +196,7 @@ Item {
 
   Timer {
     id: pollTimer
-    interval: root.status.state === "connecting" ? 1000 : Math.max(1, root.refreshIntervalSec) * 1000
+    interval: (root.status.state === "connecting" || (root.fastPolling && root.status.state === "connected")) ? 1000 : Math.max(1, root.refreshIntervalSec) * 1000
     repeat: true
     running: true
     triggeredOnStart: true
